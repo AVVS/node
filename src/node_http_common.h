@@ -123,6 +123,54 @@ enum http_known_headers {
   HTTP_KNOWN_HEADER_MAX
 };
 
+#define HTTP2_SINGLE_VALUE_HEADERS(V) \
+  V(STATUS, ":status") \
+  V(METHOD, ":method") \
+  V(AUTHORITY, ":authority") \
+  V(SCHEME, ":scheme") \
+  V(PATH, ":path") \
+  V(PROTOCOL, ":protocol") \
+  V(ACCESS_CONTROL_ALLOW_CREDENTIALS, "access-control-allow-credentials") \
+  V(ACCESS_CONTROL_MAX_AGE, "access-control-max-age") \
+  V(ACCESS_CONTROL_REQUEST_METHOD, "access-control-request-method") \
+  V(AGE, "age") \
+  V(AUTHORIZATION, "authorization") \
+  V(CONTENT_ENCODING, "content-encoding") \
+  V(CONTENT_LANGUAGE, "content-language") \
+  V(CONTENT_LENGTH, "content-length") \
+  V(CONTENT_LOCATION, "content-location") \
+  V(CONTENT_MD5, "content-md5") \
+  V(CONTENT_RANGE, "content-range") \
+  V(CONTENT_TYPE, "content-type") \
+  V(DATE, "date") \
+  V(DNT, "dnt") \
+  V(ETAG, "etag") \
+  V(EXPIRES, "expires") \
+  V(FROM, "from") \
+  V(HOST, "host") \
+  V(IF_MATCH, "if-match") \
+  V(IF_MODIFIED_SINCE, "if-modified-since") \
+  V(IF_NONE_MATCH, "if-none-match") \
+  V(IF_RANGE, "if-range") \
+  V(IF_UNMODIFIED_SINCE, "if-unmodified-since") \
+  V(LAST_MODIFIED, "last-modified") \
+  V(LOCATION, "location") \
+  V(MAX_FORWARDS, "max-forwards") \
+  V(PROXY_AUTHORIZATION, "proxy-authorization") \
+  V(RANGE, "range") \
+  V(REFERER, "referer") \
+  V(RETRY_AFTER, "retry-after") \
+  V(TK, "tk") \
+  V(UPGRADE_INSECURE_REQUESTS, "upgrade-insecure-requests") \
+  V(USER_AGENT, "user-agent") \
+  V(X_CONTENT_TYPE_OPTIONS, "x-content-type-options")
+
+static const std::unordered_set<std::string> http2_single_value_headers = {
+  #define V(name, value) #value,
+  HTTP2_SINGLE_VALUE_HEADERS(V)
+  #undef V
+};
+
 #define HTTP_STATUS_CODES(V)                                                  \
   V(CONTINUE, 100)                                                            \
   V(SWITCHING_PROTOCOLS, 101)                                                 \
@@ -252,6 +300,7 @@ class NgHeaders {
  public:
   typedef typename T::nv_t nv_t;
   inline NgHeaders(Environment* env, v8::Local<v8::Array> headers);
+  inline NgHeaders(Environment* env, v8::Local<v8::Object> headers, bool response);
   ~NgHeaders() = default;
 
   const nv_t* operator*() const {
