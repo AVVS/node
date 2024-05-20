@@ -1,4 +1,9 @@
 #include "node_http2.h"
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 #include "aliased_buffer-inl.h"
 #include "aliased_struct-inl.h"
 #include "debug_utils-inl.h"
@@ -12,12 +17,6 @@
 #include "node_revert.h"
 #include "stream_base-inl.h"
 #include "util-inl.h"
-
-#include <algorithm>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
 
 namespace node {
 
@@ -2912,12 +2911,16 @@ void Http2Stream::Respond(const FunctionCallbackInfo<Value>& args) {
   Http2Stream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.Holder());
 
-  Local<Array> headers = args[0].As<Array>();
+  CHECK_EQ(args.Length(), 2);
+  CHECK(args[0]->IsObject());
+  CHECK(args[1]->IsNumber());
+
+  Local<Object> rawHeaders = args[0].As<Object>();
   int32_t options = args[1]->Int32Value(env->context()).ToChecked();
 
   args.GetReturnValue().Set(
       stream->SubmitResponse(
-          Http2Headers(env, headers),
+          Http2Headers(env, rawHeaders, true),
           static_cast<int>(options)));
   Debug(stream, "response submitted");
 }
@@ -2940,10 +2943,10 @@ void Http2Stream::Trailers(const FunctionCallbackInfo<Value>& args) {
   Http2Stream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.Holder());
 
-  Local<Array> headers = args[0].As<Array>();
+  Local<Object> headers = args[0].As<Object>();
 
   args.GetReturnValue().Set(
-      stream->SubmitTrailers(Http2Headers(env, headers)));
+      stream->SubmitTrailers(Http2Headers(env, headers, false)));
 }
 
 // Grab the numeric id of the Http2Stream
@@ -3411,6 +3414,17 @@ void Initialize(Local<Object> target,
                                     false>);
   SetConstructorFunction(context, target, "Http2Session", session);
 
+  // Exported Symbols
+  Local<Object> symbols = Object::New(isolate);
+
+  NODE_DEFINE_SYMBOL_CONSTANT(symbols, "sensitiveHeaders", "nodejs.http2.sensitiveHeaders");
+  NODE_DEFINE_SYMBOL_CONSTANT(symbols, "socket", "socket");
+  NODE_DEFINE_SYMBOL_CONSTANT(symbols, "proxySocket", "proxySocket");
+  NODE_DEFINE_SYMBOL_CONSTANT(symbols, "request", "request");
+
+  target->Set(context, FIXED_ONE_BYTE_STRING(isolate, "symbols"), symbols).Check();
+
+  // Constants
   Local<Object> constants = Object::New(isolate);
 
   // This does allocate one more slot than needed but it's not used.

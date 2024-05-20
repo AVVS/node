@@ -1,13 +1,14 @@
 #ifndef SRC_NODE_HTTP_COMMON_INL_H_
 #define SRC_NODE_HTTP_COMMON_INL_H_
 
-#include "node_http_common.h"
-#include "node.h"
-#include "node_mem-inl.h"
-#include "env-inl.h"
-#include "v8.h"
-
 #include <algorithm>
+#include "env-inl.h"
+#include "node.h"
+#include "node_http_common.h"
+#include "node_mem-inl.h"
+#include "node_errors.h"
+#include "v8.h"
+#include "nghttp2/nghttp2.h"
 
 namespace node {
 
@@ -64,6 +65,229 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Array> headers) {
     nva[n].flags = *p;
     p++;
   }
+}
+
+// TODO: bool -> enum {request, response, trailers} for correct asserts
+// 1. how to fast-lowercase header names?
+// 2. separate memory for ng structures and actual char* so we can directly write to it and not have
+// std::string concatenation ? directly create array of ng structures?
+// 3. ensure all asserts are done
+// 4. better symbol access?
+// 5. less verbose object iteration, helpers for value processing? same code is repeated for non-array values
+// 6. unordered_set - is this what's used? this is give or take JS copy-paste, so maybe not great in c++ ?
+template <typename T>
+NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Object> headers, bool response) {
+  v8::Local<v8::Array> keys;
+  auto isolate = env->isolate();
+  auto context = env->context();
+
+  // init varialbe
+  count_ = 0;
+
+  if (!headers->GetOwnPropertyNames(context).ToLocal(&keys)) {
+    return;
+  }
+
+  uint32_t keys_length = keys->Length();
+  if (keys_length == 0) {
+    return;
+  }
+
+  // TODO: use #define / constants ? -- whats the actual convention to do it in c++?
+  auto kSensitiveHeaders = v8::Symbol::ForApi(isolate, FIXED_ONE_BYTE_STRING(isolate, "nodejs.http2.sensitiveHeaders"));
+  std::unordered_set<std::string> singles{};
+  std::unordered_set<std::string> neverIndex{};
+
+  v8::Local<v8::Value> maybeNeverIndex;
+  // TODO: something more efficient?
+  std::string pseudo_header = "";
+  std::string reserved_header = "";
+
+  if (headers->Get(context, kSensitiveHeaders).ToLocal(&maybeNeverIndex) && maybeNeverIndex->IsArray()) {
+    auto neverIndexArr = maybeNeverIndex.As<v8::Array>();
+    for (uint32_t i = 0; i < neverIndexArr->Length(); i++) {
+      v8::Local<v8::Value> val;
+
+      if (!neverIndexArr->Get(context, i).ToLocal(&val) || !val->IsString()) {
+        continue;
+      }
+
+      if (val.As<v8::String>()->Length() == 0) {
+        continue;
+      }
+
+      // normalized header name
+      std::string header_lower = ToLowerStringView(Utf8Value(isolate, val).ToStringView());
+      neverIndex.insert(header_lower);
+    }
+  }
+
+  for (uint32_t i = 0; i < keys_length; i++) {
+    auto key = keys->Get(context, i).ToLocalChecked();
+    std::string headerValue;
+
+    // TODO: handle symbols
+    if (!key->IsString()) {
+      continue;
+    }
+
+    Utf8Value headerName(isolate, key);
+    if (headerName.length() == 0) {
+      continue;
+    }
+
+    auto value = headers->Get(context, key).ToLocalChecked();
+
+    // empty
+    if (value->IsUndefined()) {
+      continue;
+    }
+
+    // normalized header name
+    std::string header_lower = ToLowerStringView(headerName.ToStringView());
+
+    bool isSingleValueHeader = http2_single_value_headers.contains(header_lower);
+    bool valueIsArray = value->IsArray();
+
+    if (valueIsArray) {
+      auto arrValue = value.As<v8::Array>();
+      auto len = arrValue->Length();
+      if (len == 0) {
+        continue;
+      } else if (len == 1) {
+        value = arrValue->Get(context, 0).ToLocalChecked();
+        if (value->IsUndefined()) {
+          continue;
+        }
+
+        v8::Local<v8::String> str;
+        if (!value->ToString(context).ToLocal(&str)) {
+          continue;
+        }
+
+        headerValue = *Utf8Value(isolate, str);
+        valueIsArray = false;
+      } else if (isSingleValueHeader) {
+        THROW_ERR_INVALID_ARG_VALUE(env, "is not a single line header");
+      }
+    } else {
+      v8::Local<v8::String> str;
+      if (!value->ToString(context).ToLocal(&str)) {
+        continue;
+      }
+
+      headerValue = *Utf8Value(isolate, str);
+    }
+
+    if (isSingleValueHeader) {
+      if (singles.contains(header_lower)) {
+        THROW_ERR_INVALID_ARG_VALUE(env, "single value header contains multiple entrie");
+      }
+
+      singles.insert(header_lower);
+    }
+
+    nghttp2_nv_flag flags = neverIndex.contains(header_lower)
+      ? nghttp2_nv_flag::NGHTTP2_NV_FLAG_NO_INDEX
+      : nghttp2_nv_flag::NGHTTP2_NV_FLAG_NONE;
+    auto flags_char = reinterpret_cast<char const*>(&flags);
+
+    if (header_lower.starts_with(':')) {
+      if (response) {
+        // TODO: ... header_lower != ':status' THROW_ERR
+      } else {
+        // validate list of headers ...
+      }
+
+      reserved_header += header_lower + '\0' + headerValue + '\0';
+      reserved_header.push_back(flags_char[0]);
+
+      count_ += 1;
+      continue;
+    }
+
+    if (header_lower.find_first_of(' ') != std::string::npos) {
+      node::THROW_ERR_INVALID_ARG_VALUE(env, "header must not contain spaces");
+    }
+
+    // TODO:
+    //     if (isIllegalConnectionSpecificHeader(key, value)) {
+    //       throw new ERR_HTTP2_INVALID_CONNECTION_HEADERS(key);
+    //     }
+
+    if (valueIsArray) {
+      auto arrVal = value.As<v8::Array>();
+      for (uint32_t j = 0; j < arrVal->Length(); j++) {
+        v8::Local<v8::Value> val;
+        if (!arrVal->Get(context, j).ToLocal(&val)) {
+          continue;
+        }
+
+        v8::Local<v8::String> str;
+        if (!val->ToString(context).ToLocal(&str)) {
+          continue;
+        }
+
+        headerValue = *Utf8Value(isolate, str);
+        pseudo_header += header_lower + '\0' + headerValue + '\0';
+        pseudo_header.push_back(flags_char[0]);
+
+        count_ += 1;
+      }
+
+      continue;
+    }
+
+    pseudo_header += header_lower + '\0' + headerValue + '\0';
+    pseudo_header.push_back(flags_char[0]);
+
+    count_ += 1;
+  }
+
+  // concat special headers & pseudo headers
+  pseudo_header = reserved_header + pseudo_header;
+  size_t header_string_len = pseudo_header.length();
+
+  Debug(env, DebugCategory::HTTP2STREAM,
+        "Headers Prepared: length: %d and headers: %d\n",
+        header_string_len, count_);
+
+  buf_.AllocateSufficientStorage((alignof(nv_t) - 1) +
+                                 count_ * sizeof(nv_t) +
+                                 header_string_len);
+
+  char* start = AlignUp(buf_.out(), alignof(nv_t));
+  char* header_contents = start + (count_ * sizeof(nv_t));
+  nv_t* const nva = reinterpret_cast<nv_t*>(start);
+
+  CHECK_LE(header_contents + header_string_len, *buf_ + buf_.length());
+
+  // pointer to start of content
+  auto pStart = &pseudo_header[0];
+  std::memcpy(header_contents, pStart, header_string_len);
+
+  size_t n = 0;
+  char* p;
+  for (p = header_contents; p < header_contents + header_string_len; n++) {
+    if (n >= count_) {
+      static uint8_t zero = '\0';
+      nva[0].name = nva[0].value = &zero;
+      nva[0].namelen = nva[0].valuelen = 1;
+      count_ = 1;
+      return;
+    }
+
+    nva[n].name = reinterpret_cast<uint8_t*>(p);
+    nva[n].namelen = strlen(p);
+    p += nva[n].namelen + 1;
+    nva[n].value = reinterpret_cast<uint8_t*>(p);
+    nva[n].valuelen = strlen(p);
+    p += nva[n].valuelen + 1;
+    nva[n].flags = *p;
+    p++;
+  }
+
+  Debug(env, DebugCategory::HTTP2STREAM, "headers prepared");
 }
 
 size_t GetClientMaxHeaderPairs(size_t max_header_pairs) {
