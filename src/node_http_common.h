@@ -166,9 +166,15 @@ enum http_known_headers {
   V(X_CONTENT_TYPE_OPTIONS, "x-content-type-options")
 
 static const std::unordered_set<std::string> http2_single_value_headers = {
-  #define V(name, value) #value,
+  #define V(name, value) value,
   HTTP2_SINGLE_VALUE_HEADERS(V)
   #undef V
+};
+
+enum http_headers_type {
+  http2_request = 0,
+  http2_response,
+  http2_trailer
 };
 
 #define HTTP_STATUS_CODES(V)                                                  \
@@ -300,7 +306,7 @@ class NgHeaders {
  public:
   typedef typename T::nv_t nv_t;
   inline NgHeaders(Environment* env, v8::Local<v8::Array> headers);
-  inline NgHeaders(Environment* env, v8::Local<v8::Object> headers, bool response);
+  inline NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_headers_type response);
   ~NgHeaders() = default;
 
   const nv_t* operator*() const {

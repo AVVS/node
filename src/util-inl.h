@@ -294,11 +294,9 @@ std::string ToLower(const std::string& in) {
   return out;
 }
 
-std::string ToLowerStringView(const std::string_view& in) {
-  std::string out(in.size(), 0);
+inline void ToLowerInPlace(std::string& in) {
   for (size_t i = 0; i < in.size(); ++i)
-    out[i] = ToLower(in[i]);
-  return out;
+    in[i] = ToLower(in[i]);
 }
 
 char ToUpper(char c) {

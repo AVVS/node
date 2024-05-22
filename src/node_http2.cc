@@ -2920,7 +2920,7 @@ void Http2Stream::Respond(const FunctionCallbackInfo<Value>& args) {
 
   args.GetReturnValue().Set(
       stream->SubmitResponse(
-          Http2Headers(env, rawHeaders, true),
+          Http2Headers(env, rawHeaders, http2_response),
           static_cast<int>(options)));
   Debug(stream, "response submitted");
 }
@@ -2946,7 +2946,7 @@ void Http2Stream::Trailers(const FunctionCallbackInfo<Value>& args) {
   Local<Object> headers = args[0].As<Object>();
 
   args.GetReturnValue().Set(
-      stream->SubmitTrailers(Http2Headers(env, headers, false)));
+      stream->SubmitTrailers(Http2Headers(env, headers, http2_trailer)));
 }
 
 // Grab the numeric id of the Http2Stream
