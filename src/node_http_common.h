@@ -5,8 +5,11 @@
 
 #include "v8.h"
 #include "node_mem.h"
+#include "util.h"
 
+#include <list>
 #include <string>
+#include <unordered_set>
 
 namespace node {
 
@@ -123,52 +126,47 @@ enum http_known_headers {
   HTTP_KNOWN_HEADER_MAX
 };
 
-#define HTTP2_SINGLE_VALUE_HEADERS(V) \
-  V(STATUS, ":status") \
-  V(METHOD, ":method") \
-  V(AUTHORITY, ":authority") \
-  V(SCHEME, ":scheme") \
-  V(PATH, ":path") \
-  V(PROTOCOL, ":protocol") \
-  V(ACCESS_CONTROL_ALLOW_CREDENTIALS, "access-control-allow-credentials") \
-  V(ACCESS_CONTROL_MAX_AGE, "access-control-max-age") \
-  V(ACCESS_CONTROL_REQUEST_METHOD, "access-control-request-method") \
-  V(AGE, "age") \
-  V(AUTHORIZATION, "authorization") \
-  V(CONTENT_ENCODING, "content-encoding") \
-  V(CONTENT_LANGUAGE, "content-language") \
-  V(CONTENT_LENGTH, "content-length") \
-  V(CONTENT_LOCATION, "content-location") \
-  V(CONTENT_MD5, "content-md5") \
-  V(CONTENT_RANGE, "content-range") \
-  V(CONTENT_TYPE, "content-type") \
-  V(DATE, "date") \
-  V(DNT, "dnt") \
-  V(ETAG, "etag") \
-  V(EXPIRES, "expires") \
-  V(FROM, "from") \
-  V(HOST, "host") \
-  V(IF_MATCH, "if-match") \
-  V(IF_MODIFIED_SINCE, "if-modified-since") \
-  V(IF_NONE_MATCH, "if-none-match") \
-  V(IF_RANGE, "if-range") \
-  V(IF_UNMODIFIED_SINCE, "if-unmodified-since") \
-  V(LAST_MODIFIED, "last-modified") \
-  V(LOCATION, "location") \
-  V(MAX_FORWARDS, "max-forwards") \
-  V(PROXY_AUTHORIZATION, "proxy-authorization") \
-  V(RANGE, "range") \
-  V(REFERER, "referer") \
-  V(RETRY_AFTER, "retry-after") \
-  V(TK, "tk") \
-  V(UPGRADE_INSECURE_REQUESTS, "upgrade-insecure-requests") \
-  V(USER_AGENT, "user-agent") \
-  V(X_CONTENT_TYPE_OPTIONS, "x-content-type-options")
-
-static const std::unordered_set<std::string> http2_single_value_headers = {
-  #define V(name, value) value,
-  HTTP2_SINGLE_VALUE_HEADERS(V)
-  #undef V
+static const std::unordered_set<size_t> http2_single_value_headers{
+  std::hash<std::string>{}(":status"),
+  std::hash<std::string>{}(":method"),
+  std::hash<std::string>{}(":authority"),
+  std::hash<std::string>{}(":scheme"),
+  std::hash<std::string>{}(":path"),
+  std::hash<std::string>{}(":protocol"),
+  std::hash<std::string>{}("access-control-allow-credentials"),
+  std::hash<std::string>{}("access-control-max-age"),
+  std::hash<std::string>{}("access-control-request-method"),
+  std::hash<std::string>{}("age"),
+  std::hash<std::string>{}("authorization"),
+  std::hash<std::string>{}("content-encoding"),
+  std::hash<std::string>{}("content-language"),
+  std::hash<std::string>{}("content-length"),
+  std::hash<std::string>{}("content-location"),
+  std::hash<std::string>{}("content-md5"),
+  std::hash<std::string>{}("content-range"),
+  std::hash<std::string>{}("content-type"),
+  std::hash<std::string>{}("date"),
+  std::hash<std::string>{}("dnt"),
+  std::hash<std::string>{}("etag"),
+  std::hash<std::string>{}("expires"),
+  std::hash<std::string>{}("from"),
+  std::hash<std::string>{}("host"),
+  std::hash<std::string>{}("if-match"),
+  std::hash<std::string>{}("if-modified-since"),
+  std::hash<std::string>{}("if-none-match"),
+  std::hash<std::string>{}("if-range"),
+  std::hash<std::string>{}("if-unmodified-since"),
+  std::hash<std::string>{}("last-modified"),
+  std::hash<std::string>{}("location"),
+  std::hash<std::string>{}("max-forwards"),
+  std::hash<std::string>{}("proxy-authorization"),
+  std::hash<std::string>{}("range"),
+  std::hash<std::string>{}("referer"),
+  std::hash<std::string>{}("retry-after"),
+  std::hash<std::string>{}("tk"),
+  std::hash<std::string>{}("upgrade-insecure-requests"),
+  std::hash<std::string>{}("user-agent"),
+  std::hash<std::string>{}("x-content-type-options")
 };
 
 enum http_headers_type {
@@ -321,9 +319,12 @@ class NgHeaders {
     return count_;
   }
 
+  using headers_list = std::list<std::tuple<std::shared_ptr<Utf8Value>, std::unique_ptr<Utf8Value>, uint8_t>>;
+
  private:
   size_t count_;
-  MaybeStackBuffer<char, 3000> buf_;
+  headers_list headers_;
+  MaybeStackBuffer<char, 1000> buf_;
 };
 
 // The ng libraries use nearly identical
