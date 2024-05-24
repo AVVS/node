@@ -157,8 +157,8 @@ inline void VALIDATE_SINGLES_HEADER(Environment* env, const bool isSingleValueHe
   singles.insert(header_hash);
 }
 
-MUST_USE_RESULT inline std::unordered_set<int> GetSensitiveHeaders(v8::Isolate* isolate, const v8::Local<v8::Object>& headers) {
-  std::unordered_set<int> neverIndex{};
+MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(v8::Isolate* isolate, const v8::Local<v8::Object>& headers) {
+  std::unordered_set<size_t> neverIndex{};
 
   // TODO: use #define / constants ? -- whats the actual convention to do it in c++?
   auto kSensitiveHeaders = v8::Symbol::ForApi(isolate,
