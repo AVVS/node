@@ -68,19 +68,10 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Array> headers) {
   }
 }
 
-MUST_USE_RESULT inline bool NormalizeString(std::shared_ptr<Utf8Value>& out) {
-  auto len = out->length();
-  auto str = **out;
-  if (ada::idna::ascii_has_upper_case(str, len)) {
-    for (size_t i = 0; i < len; ++i) {
-      str[i] = ToLower(str[i]);
-    }
-  }
-
-  return true;
-}
-
-MUST_USE_RESULT inline bool ToString(v8::Isolate* isolate, v8::Local<v8::Context>& context, const v8::Local<v8::Value>& in, std::unique_ptr<Utf8Value>& ptr) {
+MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
+                                     v8::Local<v8::Context>& context,
+                                     const v8::Local<v8::Value>& in,
+                                     std::unique_ptr<v8::FastOneByteString>& ptr) {
   v8::Local<v8::String> str_;
   if (in->IsString()) {
     str_ = in.As<v8::String>();
@@ -88,11 +79,27 @@ MUST_USE_RESULT inline bool ToString(v8::Isolate* isolate, v8::Local<v8::Context
     return false;
   }
 
-  ptr = std::make_unique<Utf8Value>(isolate, str_);
+  // TODO: for headers must be true?
+  if (!str_->IsOneByte()) {
+    return false;
+  }
+
+  uint32_t str_len = str_->Length();
+  char* str = new char[str_len + 1];
+  str_->WriteOneByte(isolate,
+                    reinterpret_cast<uint8_t*>(&str),
+                    0,
+                    str_len,
+                    v8::String::WriteOptions::PRESERVE_ONE_BYTE_NULL);
+
+  ptr = std::make_unique<v8::FastOneByteString>(v8::FastOneByteString{ str, str_len });
   return true;
 }
 
-MUST_USE_RESULT inline bool ToString(v8::Isolate* isolate, v8::Local<v8::Context>& context, const v8::Local<v8::Value>& in, std::shared_ptr<Utf8Value>& ptr) {
+MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
+                                     v8::Local<v8::Context>& context,
+                                     const v8::Local<v8::Value>& in,
+                                     std::shared_ptr<v8::FastOneByteString>& ptr) {
   v8::Local<v8::String> str_;
   if (in->IsString()) {
     str_ = in.As<v8::String>();
@@ -100,74 +107,120 @@ MUST_USE_RESULT inline bool ToString(v8::Isolate* isolate, v8::Local<v8::Context
     return false;
   }
 
-  ptr = std::make_shared<Utf8Value>(isolate, str_);
+  // TODO: for headers must be true?
+  if (!str_->IsOneByte()) {
+    return false;
+  }
+
+  uint32_t str_len = str_->Length();
+  char* str = new char[str_len + 1];
+  str_->WriteOneByte(isolate,
+                    reinterpret_cast<uint8_t*>(str),
+                    0,
+                    str_len,
+                    v8::String::WriteOptions::PRESERVE_ONE_BYTE_NULL);
+  ada::idna::ascii_map(str, str_len);
+
+  ptr = std::make_shared<v8::FastOneByteString>(v8::FastOneByteString{ str, str_len });
   return true;
 }
 
 // TODO: move strings to prehashed unordered_set, and search for hash
 // verifies if header is illegal
-inline void VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(v8::Isolate* isolate, const std::string_view& name, const std::string_view& value) {
-  if (name == "connection" ||
-      name == "upgrade" ||
-      name == "http2-settings" ||
-      name == "keep-alive" ||
-      name == "proxy-connection" ||
-      name == "transfer-encoding") {
-    THROW_ERR_INVALID_ARG_VALUE(isolate, "invalid connection header %s", name);
+static const size_t te_hash = std::hash<std::string>{}("te");
+static const size_t status_hash = std::hash<std::string>{}(":status");
+static const std::unordered_set<size_t> ng_forbidden_headers{
+  std::hash<std::string>{}("connection"),
+  std::hash<std::string>{}("upgrade"),
+  std::hash<std::string>{}("http2-settings"),
+  std::hash<std::string>{}("keep-alive"),
+  std::hash<std::string>{}("proxy-connection"),
+  std::hash<std::string>{}("transfer-encoding"),
+};
+static const std::unordered_set<size_t> ng_valid_pseudo_headers{
+  std::hash<std::string>{}(":status"),
+  std::hash<std::string>{}(":method"),
+  std::hash<std::string>{}(":authority"),
+  std::hash<std::string>{}(":scheme"),
+  std::hash<std::string>{}(":path"),
+  std::hash<std::string>{}(":protocol")
+};
+
+inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
+        Environment*& env,
+        const size_t& hash,
+        const char*& value) {
+
+  if (ng_forbidden_headers.contains(hash)) {
+    THROW_ERR_INVALID_ARG_VALUE(env, "invalid connection header");
+    return false;
   }
 
-  if (name == "te" && value != "trailers") {
-    THROW_ERR_INVALID_ARG_VALUE(isolate, "invalid trailer header %s", name);
+  if (hash == te_hash && strcmp(value, "trailers") == 0) {
+    THROW_ERR_INVALID_ARG_VALUE(env, "invalid trailer header `te`");
+    return false;
   }
+
+  return true;
 }
 
 // TODO: move strings to prehashed unordered_set, and search for hash
-inline void VALIDATE_PSEUDO_HEADER(v8::Isolate* isolate, const std::string_view& name, const http_headers_type& type) {
+inline bool VALIDATE_PSEUDO_HEADER(Environment*& env,
+                                  const size_t& hash,
+                                  const http_headers_type& type) {
   switch (type) {
     case http2_request:
-      if (name != ":status" &&
-          name != ":method" &&
-          name != ":authority" &&
-          name != ":scheme" &&
-          name != ":path" &&
-          name != ":protocol") {
-        THROW_ERR_INVALID_ARG_VALUE(isolate, "ERR_HTTP2_INVALID_PSEUDOHEADER");
+      if (!ng_valid_pseudo_headers.contains(hash)) {
+        THROW_ERR_INVALID_ARG_VALUE(env, "ERR_HTTP2_INVALID_PSEUDOHEADER");
+        return false;
       }
       break;
     case http2_response:
-      if (name != ":status") {
-        THROW_ERR_INVALID_ARG_VALUE(isolate, "ERR_HTTP2_INVALID_PSEUDOHEADER");
+      if (hash != status_hash) {
+        THROW_ERR_INVALID_ARG_VALUE(env, "ERR_HTTP2_INVALID_PSEUDOHEADER");
+        return false;
       }
       break;
     case http2_trailer:
-      THROW_ERR_INVALID_ARG_VALUE(isolate, "ERR_HTTP2_INVALID_PSEUDOHEADER");
+      THROW_ERR_INVALID_ARG_VALUE(env, "ERR_HTTP2_INVALID_PSEUDOHEADER");
+      return false;
       break;
   }
+
+  return true;
 }
 
-inline void VALIDATE_SINGLES_HEADER(Environment* env, const bool isSingleValueHeader, std::unordered_set<size_t>& singles, const size_t& header_hash) {
+inline bool VALIDATE_SINGLES_HEADER(Environment*& env,
+                                    const bool& isSingleValueHeader,
+                                    std::unordered_set<size_t>& singles,
+                                    const size_t& header_hash) {
   if (!isSingleValueHeader) {
-    return;
+    return true;
   }
 
   if (singles.contains(header_hash)) {
     THROW_ERR_INVALID_ARG_VALUE(env, "single value header contains multiple entries");
+    return false;
   }
 
   singles.insert(header_hash);
+  return true;
 }
 
-MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(v8::Isolate* isolate, const v8::Local<v8::Object>& headers) {
+MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(
+    v8::Isolate*& isolate,
+    v8::Local<v8::Context>& context,
+    const v8::Local<v8::Object>& headers) {
+
   std::unordered_set<size_t> neverIndex{};
 
   // TODO: use #define / constants ? -- whats the actual convention to do it in c++?
   auto kSensitiveHeaders = v8::Symbol::ForApi(isolate,
       FIXED_ONE_BYTE_STRING(isolate, "nodejs.http2.sensitiveHeaders"));
-  auto context = isolate->GetCurrentContext();
 
   // construct sensitive headers index
   v8::Local<v8::Value> maybeNeverIndex;
-  std::shared_ptr<Utf8Value> header;
+  std::shared_ptr<v8::FastOneByteString> header;
   if (headers->Get(context, kSensitiveHeaders).ToLocal(&maybeNeverIndex) &&
       maybeNeverIndex->IsArray()) {
     auto neverIndexArr = maybeNeverIndex.As<v8::Array>();
@@ -177,11 +230,11 @@ MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(v8::Isolat
         continue;
       }
 
-      if (!ToString(isolate, context, val, header) || !NormalizeString(header)) {
+      if (!ToString(isolate, context, val, header)) {
         continue;
       }
 
-      neverIndex.insert(std::hash<std::string_view>{}(header->ToStringView()));
+      neverIndex.insert(std::hash<std::string_view>{}(header->data));
     }
   }
 
@@ -197,7 +250,7 @@ MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(v8::Isolat
 // 5. less verbose object iteration, helpers for value processing? same code is repeated for non-array values
 // 6. unordered_set - is this what's used? this is give or take JS copy-paste, so maybe not great in c++ ?
 template <typename T>
-NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_headers_type header_type) {
+NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_headers_type header_type) {
   v8::Local<v8::Array> keys;
   auto isolate = env->isolate();
   auto context = env->context();
@@ -206,7 +259,11 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_he
   count_ = 0;
 
   // filter by default is static_cast<v8::PropertyFilter>(ONLY_ENUMERABLE | SKIP_SYMBOLS)
-  if (!headers->GetOwnPropertyNames(context).ToLocal(&keys)) {
+  if (!headers->GetPropertyNames(context,
+                                 v8::KeyCollectionMode::kOwnOnly,
+                                 static_cast<v8::PropertyFilter>(v8::PropertyFilter::ONLY_ENUMERABLE | v8::PropertyFilter::SKIP_SYMBOLS),
+                                 v8::IndexFilter::kSkipIndices,
+                                 v8::KeyConversionMode::kNoNumbers).ToLocal(&keys)) {
     return;
   }
 
@@ -217,12 +274,12 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_he
 
   // sort keys with : in front
   std::unordered_set<size_t> singles{};
-  auto neverIndex = GetSensitiveHeaders(isolate, headers);
+  auto neverIndex = GetSensitiveHeaders(isolate, context, headers);
 
   v8::Local<v8::Value> key_;
   v8::Local<v8::Value> value_;
-  std::shared_ptr<Utf8Value> header;
-  std::unique_ptr<Utf8Value> value;
+  std::shared_ptr<v8::FastOneByteString> header;
+  std::unique_ptr<v8::FastOneByteString> value;
 
   // pre-sort headers & results into 2 lists
   // verify basic header information
@@ -236,12 +293,11 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_he
       continue;
     }
 
-    if (!ToString(isolate, context, key_, header) ||
-        !NormalizeString(header)) {
+    if (!ToString(isolate, context, key_, header)) {
       continue;
     }
 
-    auto str_view = header->ToStringView();
+    auto str_view = std::string_view(header->data, header->length);
     auto str_view_hash = std::hash<std::string_view>{}(str_view);
     bool isSingleValueHeader = http2_single_value_headers.contains(str_view_hash);
     uint8_t flags = neverIndex.contains(str_view_hash)
@@ -250,27 +306,26 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_he
 
     // all ':' are single value headers
     if (str_view[0] == ':') {
-      if (!value_->IsString()) {
-        THROW_ERR_INVALID_ARG_VALUE(env, "reserved header must be a string");
+      if (!value_->IsString() && !value_->IsNumber()) {
+        THROW_ERR_INVALID_ARG_VALUE(env, "reserved header must be a string or a number");
+        return;
       }
 
       if (!ToString(isolate, context, value_, value)) {
         continue;
       }
 
-      VALIDATE_PSEUDO_HEADER(isolate, str_view, header_type);
-      VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash);
+      if (!VALIDATE_PSEUDO_HEADER(env, str_view_hash, header_type)) return;
+      if (!VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash)) return;
 
       headers_.emplace_front(header, std::move(value), flags);
       value = nullptr;
 
       ++count_;
       continue;
-    }
-
-    // verify lack of spaces
-    if (str_view.find_first_of(' ') != std::string::npos) {
+    } else if (str_view.find_first_of(' ') != std::string::npos) {
       THROW_ERR_INVALID_ARG_VALUE(env, "header must not contain spaces");
+      return;
     }
 
     // handle non-array standard headers
@@ -279,8 +334,8 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_he
         continue;
       }
 
-      VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash);
-      VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, str_view, value->ToStringView());
+      if (!VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash)) return;
+      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(env, str_view_hash, value->data)) return;
 
       headers_.emplace_back(header, std::move(value), flags);
       value = nullptr;
@@ -300,8 +355,8 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_he
         continue;
       }
 
-      VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash);
-      VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, str_view, value->ToStringView());
+      if (!VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash)) return;
+      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(env, str_view_hash, value->data)) return;
 
       headers_.emplace_back(header, std::move(value), flags);
       value = nullptr;
@@ -324,10 +379,10 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_he
     auto& v = *get<1>(elem);
     auto& f = get<2>(elem);
 
-    nva[n].name = reinterpret_cast<uint8_t*>(*h);
-    nva[n].namelen = h.length();
-    nva[n].value = reinterpret_cast<uint8_t*>(*v);
-    nva[n].valuelen = v.length();
+    nva[n].name = reinterpret_cast<uint8_t*>(const_cast<char*>(h.data));
+    nva[n].namelen = h.length;
+    nva[n].value = reinterpret_cast<uint8_t*>(const_cast<char*>(v.data));
+    nva[n].valuelen = v.length;
     nva[n].flags = f;
 
     ++n;

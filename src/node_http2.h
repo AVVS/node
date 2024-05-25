@@ -16,11 +16,15 @@
 #include "node_perf.h"
 #include "stream_base.h"
 #include "string_bytes.h"
+#include "v8-fast-api-calls.h"
+#include "v8.h"
 
 #include <algorithm>
 #include <queue>
 
 namespace node {
+
+class ExternalReferenceRegistry;
 namespace http2 {
 
 // Constants in all caps are exported as user-facing constants

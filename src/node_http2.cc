@@ -2515,11 +2515,11 @@ int Http2Stream::DoWrite(WriteWrap* req_wrap,
   for (size_t i = 0; i < nbufs; ++i) {
     // Store the req_wrap on the last write info in the queue, so that it is
     // only marked as finished once all buffers associated with it are finished.
-    queue_.emplace(NgHttp2StreamWrite {
+    queue_.emplace(
       BaseObjectPtr<AsyncWrap>(
           i == nbufs - 1 ? req_wrap->GetAsyncWrap() : nullptr),
       bufs[i]
-    });
+    );
     IncrementAvailableOutboundLength(bufs[i].len);
   }
   CHECK_NE(nghttp2_session_resume_data(

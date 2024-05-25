@@ -4,6 +4,7 @@
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #include "v8.h"
+#include "v8-fast-api-calls.h"
 #include "node_mem.h"
 #include "util.h"
 
@@ -304,7 +305,7 @@ class NgHeaders {
  public:
   typedef typename T::nv_t nv_t;
   inline NgHeaders(Environment* env, v8::Local<v8::Array> headers);
-  inline NgHeaders(Environment* env, v8::Local<v8::Object> headers, http_headers_type response);
+  inline NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_headers_type response);
   ~NgHeaders() = default;
 
   const nv_t* operator*() const {
@@ -319,7 +320,7 @@ class NgHeaders {
     return count_;
   }
 
-  using headers_list = std::list<std::tuple<std::shared_ptr<Utf8Value>, std::unique_ptr<Utf8Value>, uint8_t>>;
+  using headers_list = std::list<std::tuple<std::shared_ptr<v8::FastOneByteString>, std::unique_ptr<v8::FastOneByteString>, uint8_t>>;
 
  private:
   size_t count_;
