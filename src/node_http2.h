@@ -25,6 +25,7 @@
 namespace node {
 
 class ExternalReferenceRegistry;
+
 namespace http2 {
 
 // Constants in all caps are exported as user-facing constants

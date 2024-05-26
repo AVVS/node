@@ -292,6 +292,14 @@ enum http_status_codes {
   V(UPDATEREDIRECTREF, "UPDATEREDIRECTREF")                                   \
   V(VERSION_CONTROL, "VERSION-CONTROL")
 
+struct SharedOneByteString {
+  std::unique_ptr<char[]> data;
+  uint32_t length;
+};
+
+using shared_str_ptr = std::shared_ptr<SharedOneByteString>;
+using unique_str_ptr = std::unique_ptr<SharedOneByteString>;
+
 // NgHeaders takes as input a block of headers provided by the
 // JavaScript side (see http2's mapToHeaders function) and
 // converts it into a array of ng header structs. This is done
@@ -320,12 +328,12 @@ class NgHeaders {
     return count_;
   }
 
-  using headers_list = std::list<std::tuple<std::shared_ptr<v8::FastOneByteString>, std::unique_ptr<v8::FastOneByteString>, uint8_t>>;
+  using headers_list = std::list<std::tuple<shared_str_ptr, unique_str_ptr, uint8_t>>;
 
  private:
   size_t count_;
   headers_list headers_;
-  MaybeStackBuffer<char, 1000> buf_;
+  MaybeStackBuffer<char, 1024> buf_;
 };
 
 // The ng libraries use nearly identical

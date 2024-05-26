@@ -71,7 +71,7 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Array> headers) {
 MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
                                      v8::Local<v8::Context>& context,
                                      const v8::Local<v8::Value>& in,
-                                     std::unique_ptr<v8::FastOneByteString>& ptr) {
+                                     unique_str_ptr& ptr) {
   v8::Local<v8::String> str_;
   if (in->IsString()) {
     str_ = in.As<v8::String>();
@@ -85,21 +85,24 @@ MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
   }
 
   uint32_t str_len = str_->Length();
-  char* str = new char[str_len + 1];
+  std::unique_ptr<char[]> str(new char[str_len + 1]);
   str_->WriteOneByte(isolate,
-                    reinterpret_cast<uint8_t*>(&str),
+                    reinterpret_cast<uint8_t*>(str.get()),
                     0,
                     str_len,
                     v8::String::WriteOptions::PRESERVE_ONE_BYTE_NULL);
 
-  ptr = std::make_unique<v8::FastOneByteString>(v8::FastOneByteString{ str, str_len });
+  ptr = std::make_unique<SharedOneByteString>(SharedOneByteString{
+    std::move(str),
+    str_len
+  });
   return true;
 }
 
 MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
                                      v8::Local<v8::Context>& context,
                                      const v8::Local<v8::Value>& in,
-                                     std::shared_ptr<v8::FastOneByteString>& ptr) {
+                                     shared_str_ptr& ptr) {
   v8::Local<v8::String> str_;
   if (in->IsString()) {
     str_ = in.As<v8::String>();
@@ -113,15 +116,19 @@ MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
   }
 
   uint32_t str_len = str_->Length();
-  char* str = new char[str_len + 1];
+  std::unique_ptr<char[]> str(new char[str_len + 1]);
   str_->WriteOneByte(isolate,
-                    reinterpret_cast<uint8_t*>(str),
+                    reinterpret_cast<uint8_t*>(str.get()),
                     0,
                     str_len,
                     v8::String::WriteOptions::PRESERVE_ONE_BYTE_NULL);
-  ada::idna::ascii_map(str, str_len);
+  ada::idna::ascii_map(str.get(), str_len);
 
-  ptr = std::make_shared<v8::FastOneByteString>(v8::FastOneByteString{ str, str_len });
+  ptr = std::make_shared<SharedOneByteString>(SharedOneByteString {
+    std::move(str),
+    str_len
+  });
+
   return true;
 }
 
@@ -149,14 +156,14 @@ static const std::unordered_set<size_t> ng_valid_pseudo_headers{
 inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
         Environment*& env,
         const size_t& hash,
-        const char*& value) {
+        const std::string_view& value) {
 
   if (ng_forbidden_headers.contains(hash)) {
     THROW_ERR_INVALID_ARG_VALUE(env, "invalid connection header");
     return false;
   }
 
-  if (hash == te_hash && strcmp(value, "trailers") == 0) {
+  if (hash == te_hash && value == "trailers") {
     THROW_ERR_INVALID_ARG_VALUE(env, "invalid trailer header `te`");
     return false;
   }
@@ -220,7 +227,7 @@ MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(
 
   // construct sensitive headers index
   v8::Local<v8::Value> maybeNeverIndex;
-  std::shared_ptr<v8::FastOneByteString> header;
+  shared_str_ptr header;
   if (headers->Get(context, kSensitiveHeaders).ToLocal(&maybeNeverIndex) &&
       maybeNeverIndex->IsArray()) {
     auto neverIndexArr = maybeNeverIndex.As<v8::Array>();
@@ -234,7 +241,7 @@ MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(
         continue;
       }
 
-      neverIndex.insert(std::hash<std::string_view>{}(header->data));
+      neverIndex.insert(std::hash<std::string_view>{}(header->data.get()));
     }
   }
 
@@ -278,8 +285,8 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
 
   v8::Local<v8::Value> key_;
   v8::Local<v8::Value> value_;
-  std::shared_ptr<v8::FastOneByteString> header;
-  std::unique_ptr<v8::FastOneByteString> value;
+  shared_str_ptr header;
+  unique_str_ptr value;
 
   // pre-sort headers & results into 2 lists
   // verify basic header information
@@ -297,7 +304,7 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
       continue;
     }
 
-    auto str_view = std::string_view(header->data, header->length);
+    auto str_view = std::string_view(header->data.get(), header->length);
     auto str_view_hash = std::hash<std::string_view>{}(str_view);
     bool isSingleValueHeader = http2_single_value_headers.contains(str_view_hash);
     uint8_t flags = neverIndex.contains(str_view_hash)
@@ -335,7 +342,7 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
       }
 
       if (!VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash)) return;
-      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(env, str_view_hash, value->data)) return;
+      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(env, str_view_hash, value->data.get())) return;
 
       headers_.emplace_back(header, std::move(value), flags);
       value = nullptr;
@@ -356,7 +363,7 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
       }
 
       if (!VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash)) return;
-      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(env, str_view_hash, value->data)) return;
+      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(env, str_view_hash, value->data.get())) return;
 
       headers_.emplace_back(header, std::move(value), flags);
       value = nullptr;
@@ -379,9 +386,9 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
     auto& v = *get<1>(elem);
     auto& f = get<2>(elem);
 
-    nva[n].name = reinterpret_cast<uint8_t*>(const_cast<char*>(h.data));
+    nva[n].name = reinterpret_cast<uint8_t*>(h.data.get());
     nva[n].namelen = h.length;
-    nva[n].value = reinterpret_cast<uint8_t*>(const_cast<char*>(v.data));
+    nva[n].value = reinterpret_cast<uint8_t*>(v.data.get());
     nva[n].valuelen = v.length;
     nva[n].flags = f;
 
