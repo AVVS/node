@@ -188,7 +188,8 @@ inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate*& isolate,
     case http2_trailer: break;
   }
 
-  Debug(Realm::GetCurrent(isolate)->env(), DebugCategory::HTTP2STREAM, "invalid pseudo header %s", name);
+  Debug(Realm::GetCurrent(isolate)->env(), DebugCategory::HTTP2STREAM,
+    "invalid pseudo header %s - %d vs %d\n", name, hash, status_hash);
   THROW_ERR_HTTP2_INVALID_PSEUDOHEADER(isolate, "\"%s\" is an invalid pseudoheader or is used incorrectly", name);
   return false;
 }

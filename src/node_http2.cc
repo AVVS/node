@@ -1202,6 +1202,7 @@ int Http2Session::OnFrameSent(nghttp2_session* handle,
     auto stream = session->FindStream(hd.stream_id);
     if (!stream->outgoing_headers_.empty()) {
       stream->outgoing_headers_.pop();
+      Debug(stream->env(), DebugCategory::HTTP2STREAM, "frame sent on %d\n", hd.stream_id);
     }
   }
 
@@ -2938,9 +2939,9 @@ void Http2Stream::Respond(const FunctionCallbackInfo<Value>& args) {
 
   // store headers until we receive frame_sent / not_sent
   stream->outgoing_headers_.push(headers_ptr);
-
   args.GetReturnValue().Set(
       stream->SubmitResponse(*headers_ptr, static_cast<int>(options)));
+
   Debug(stream, "response submitted");
 }
 
@@ -2951,9 +2952,19 @@ void Http2Stream::Info(const FunctionCallbackInfo<Value>& args) {
   Http2Stream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.Holder());
 
-  Local<Array> headers = args[0].As<Array>();
+  HandleScope handle_scope(env->isolate());
+  Local<Object> headers = args[0].As<Object>();
 
-  args.GetReturnValue().Set(stream->SubmitInfo(Http2Headers(env, headers)));
+  auto headers_ptr = std::make_shared<Http2Headers>(env, headers, http2_response);
+  if (!headers_ptr->isValid()) {
+    Debug(stream, "info headers invalid, returning");
+    return;
+  }
+
+  stream->outgoing_headers_.push(headers_ptr);
+  args.GetReturnValue().Set(stream->SubmitInfo(*headers_ptr));
+
+  Debug(stream, "info headers submitted");
 }
 
 // Submits trailing headers on the Http2Stream
