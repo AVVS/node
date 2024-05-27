@@ -68,72 +68,6 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Array> headers) {
   }
 }
 
-MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
-                                     v8::Local<v8::Context>& context,
-                                     const v8::Local<v8::Value>& in,
-                                     unique_str_ptr& ptr) {
-  v8::Local<v8::String> str_;
-  if (in->IsString()) {
-    str_ = in.As<v8::String>();
-  } else if (!in->ToString(context).ToLocal(&str_)) {
-    return false;
-  }
-
-  // TODO: for headers must be true?
-  if (!str_->IsOneByte()) {
-    return false;
-  }
-
-  uint32_t str_len = str_->Length();
-  std::unique_ptr<char[]> str(new char[str_len + 1]);
-  str_->WriteOneByte(isolate,
-                    reinterpret_cast<uint8_t*>(str.get()),
-                    0,
-                    str_len,
-                    v8::String::WriteOptions::PRESERVE_ONE_BYTE_NULL);
-
-  ptr = std::make_unique<SharedOneByteString>(SharedOneByteString{
-    std::move(str),
-    str_len
-  });
-  return true;
-}
-
-MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
-                                     v8::Local<v8::Context>& context,
-                                     const v8::Local<v8::Value>& in,
-                                     shared_str_ptr& ptr) {
-  v8::Local<v8::String> str_;
-  if (in->IsString()) {
-    str_ = in.As<v8::String>();
-  } else if (!in->ToString(context).ToLocal(&str_)) {
-    return false;
-  }
-
-  // TODO: for headers must be true?
-  if (!str_->IsOneByte()) {
-    return false;
-  }
-
-  uint32_t str_len = str_->Length();
-  std::unique_ptr<char[]> str(new char[str_len + 1]);
-  str_->WriteOneByte(isolate,
-                    reinterpret_cast<uint8_t*>(str.get()),
-                    0,
-                    str_len,
-                    v8::String::WriteOptions::PRESERVE_ONE_BYTE_NULL);
-  ada::idna::ascii_map(str.get(), str_len);
-
-  ptr = std::make_shared<SharedOneByteString>(SharedOneByteString {
-    std::move(str),
-    str_len
-  });
-
-  return true;
-}
-
-// TODO: move strings to prehashed unordered_set, and search for hash
-// verifies if header is illegal
 static const size_t te_hash = std::hash<std::string>{}("te");
 static const size_t status_hash = std::hash<std::string>{}(":status");
 static const std::unordered_set<size_t> ng_forbidden_headers{
@@ -153,7 +87,7 @@ static const std::unordered_set<size_t> ng_valid_pseudo_headers{
   std::hash<std::string>{}(":protocol")
 };
 
-inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
+MUST_USE_RESULT inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
         v8::Isolate*& isolate,
         const std::string_view& header,
         const size_t& hash,
@@ -169,8 +103,7 @@ inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
   return true;
 }
 
-// TODO: move strings to prehashed unordered_set, and search for hash
-inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate*& isolate,
+MUST_USE_RESULT inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate*& isolate,
                                   const size_t& hash,
                                   const std::string_view& name,
                                   const http_headers_type& type) {
@@ -194,7 +127,7 @@ inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate*& isolate,
   return false;
 }
 
-inline bool VALIDATE_SINGLES_HEADER(v8::Isolate*& isolate,
+MUST_USE_RESULT inline bool VALIDATE_SINGLES_HEADER(v8::Isolate*& isolate,
                                     std::unordered_set<size_t>& singles,
                                     const bool& isSingleValueHeader,
                                     const std::string_view& header,
@@ -212,9 +145,29 @@ inline bool VALIDATE_SINGLES_HEADER(v8::Isolate*& isolate,
   return true;
 }
 
+MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
+                                     const v8::Local<v8::Context>& context,
+                                     const v8::Local<v8::Value>& in,
+                                     v8::Local<v8::String>* out) {
+  v8::Local<v8::String> str_;
+  if (in->IsString()) {
+    str_ = in.As<v8::String>();
+  } else if (!in->ToString(context).ToLocal(&str_)) {
+    return false;
+  }
+
+  // TODO: for headers must be true?
+  if (!str_->IsOneByte()) {
+    return false;
+  }
+
+  *out = str_;
+  return true;
+}
+
 MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(
     v8::Isolate*& isolate,
-    v8::Local<v8::Context>& context,
+    const v8::Local<v8::Context>& context,
     const v8::Local<v8::Object>& headers) {
 
   std::unordered_set<size_t> neverIndex{};
@@ -225,25 +178,45 @@ MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(
 
   // construct sensitive headers index
   v8::Local<v8::Value> maybeNeverIndex;
-  shared_str_ptr header;
+  v8::Local<v8::Value> val;
+  v8::Local<v8::String> header;
+
   if (headers->Get(context, kSensitiveHeaders).ToLocal(&maybeNeverIndex) &&
       maybeNeverIndex->IsArray()) {
     auto neverIndexArr = maybeNeverIndex.As<v8::Array>();
-    v8::Local<v8::Value> val;
+    MaybeStackBuffer<char, 64> storage{};
+
     for (uint32_t i = 0, l = neverIndexArr->Length(); i < l; ++i) {
       if (!neverIndexArr->Get(context, i).ToLocal(&val) || !val->IsString()) {
         continue;
       }
 
-      if (!ToString(isolate, context, val, header)) {
+      if (!ToString(isolate, context, val, &header)) {
         continue;
       }
 
-      neverIndex.insert(std::hash<std::string_view>{}(header->data.get()));
+      size_t str_len = header->Length();
+      storage.AllocateSufficientStorage(str_len);
+      auto buf = storage.out();
+      header->WriteOneByte(isolate,
+          reinterpret_cast<uint8_t*>(buf),
+          0,
+          str_len,
+          v8::String::WriteOptions::NO_NULL_TERMINATION);
+      ada::idna::ascii_map(buf, str_len);
+
+      neverIndex.insert(std::hash<std::string_view>{}(std::string_view(buf, str_len)));
     }
   }
 
   return neverIndex;
+}
+
+inline void GetFirstChar(
+  v8::Isolate*& isolate,
+  const v8::Local<v8::String>& str,
+  char*& buf) {
+  str->WriteOneByte(isolate, reinterpret_cast<uint8_t*>(buf), 0, 1, v8::String::WriteOptions::NO_NULL_TERMINATION);
 }
 
 static const nghttp2_nv_flag Http2NoIndexNoCopyNameValue = static_cast<nghttp2_nv_flag>(
@@ -293,8 +266,17 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
 
   v8::Local<v8::Value> key_;
   v8::Local<v8::Value> value_;
-  shared_str_ptr header;
-  unique_str_ptr value;
+  v8::Local<v8::String> header;
+  v8::Local<v8::String> value;
+
+  std::vector<std::pair<v8::Local<v8::String>, std::vector<v8::Local<v8::String>>>> tmp_nv{};
+  size_t storage_required = 0;
+  tmp_nv.reserve(keys_length);
+
+  // contains pseudo_buffer
+  std::unique_ptr<char[]> cbuf(new char[1]);
+  char* buf = cbuf.get();
+  bool is_pseudo;
 
   // pre-sort headers & results into 2 lists
   // verify basic header information
@@ -308,96 +290,117 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
       continue;
     }
 
-    if (!ToString(isolate, context, key_, header)) {
+    if (!ToString(isolate, context, key_, &header)) {
       continue;
     }
 
-    auto str_view = std::string_view(header->data.get(), header->length);
-    auto str_view_hash = std::hash<std::string_view>{}(str_view);
-    bool isSingleValueHeader = http2_single_value_headers.contains(str_view_hash);
-    uint8_t flags = neverIndex.contains(str_view_hash)
-      ? Http2NoIndexNoCopyNameValue
-      : Http2NoCopyNameValue;
-
-    // all ':' are single value headers
-    if (str_view[0] == ':') {
-      if (!ToString(isolate, context, value_, value)) {
-        continue;
-      }
-
-      if (!VALIDATE_PSEUDO_HEADER(isolate, str_view_hash, str_view, header_type)) return;
-      if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, str_view, str_view_hash)) return;
-
-      headers_.emplace_front(header, std::move(value), flags);
-      value = nullptr;
-
-      ++count_;
-      continue;
-    } else if (str_view.find_first_of(' ') != std::string::npos) {
-      THROW_ERR_INVALID_HTTP_TOKEN(isolate, "Header name must be a valid HTTP token [\"%s\"]", str_view);
-      return;
-    }
-
-    // handle non-array standard headers
     if (!value_->IsArray()) {
-      if (!ToString(isolate, context, value_, value)) {
+      if (!ToString(isolate, context, value_, &value)) {
         continue;
       }
 
-      if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, str_view, str_view_hash)) return;
-      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, str_view, str_view_hash, value->data.get())) return;
+      // pseudo headers can't have multiple values, so we only check singular values
+      GetFirstChar(isolate, header, buf);
+      is_pseudo = buf[0] == ':';
 
-      headers_.emplace_back(header, std::move(value), flags);
-      value = nullptr;
-
+      storage_required += value->Length();
+      if (is_pseudo) {
+        tmp_nv.emplace(tmp_nv.begin(), header, std::vector<v8::Local<v8::String>>{value});
+      } else {
+        tmp_nv.emplace_back(header, std::vector<v8::Local<v8::String>>{value});
+      }
       ++count_;
-      continue;
+    } else {
+      v8::Local<v8::Array> arrValue = value_.As<v8::Array>();
+      auto l = arrValue->Length();
+      bool allocated = false;
+      std::vector<v8::Local<v8::String>> val_vec{};
+      val_vec.reserve(l);
+
+      for (uint32_t j = 0; j < l; j++) {
+        if (!arrValue->Get(context, j).ToLocal(&value_) ||
+            !ToString(isolate, context, value_, &value)) {
+          continue;
+        }
+
+        allocated = true;
+        storage_required += value->Length();
+        val_vec.push_back(value);
+        ++count_;
+      }
+
+      if (!allocated) {
+        continue;
+      }
+
+      tmp_nv.emplace_back(header, val_vec);
     }
 
-    v8::Local<v8::Array> arrValue = value_.As<v8::Array>();
-    v8::Local<v8::Value> arrMember_;
-    for (uint32_t j = 0, l = arrValue->Length(); j < l; j++) {
-      if (!arrValue->Get(context, j).ToLocal(&arrMember_)) {
-        continue;
-      }
-
-      if (!ToString(isolate, context, arrMember_, value)) {
-        continue;
-      }
-
-      if (!VALIDATE_SINGLES_HEADER(isolate, singles,
-        isSingleValueHeader, str_view, str_view_hash)) return;
-      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate,
-        str_view, str_view_hash, value->data.get())) return;
-
-      headers_.emplace_back(header, std::move(value), flags);
-      value = nullptr;
-
-      ++count_;
-    }
+    storage_required += header->Length();
   }
 
   // pre-allocate storage, we may have _more_ storage than required
   buf_.AllocateSufficientStorage((alignof(nv_t) - 1) +
-                                 count_ * sizeof(nv_t));
+                                 count_ * sizeof(nv_t) +
+                                 storage_required);
 
-  char* start = AlignUp(buf_.out(), alignof(nv_t));
-  nv_t* const nva = reinterpret_cast<nv_t*>(start);
+  char* nva_start = AlignUp(buf_.out(), alignof(nv_t));
+  nv_t* const nva = reinterpret_cast<nv_t*>(nva_start);
+  char* header_contents = nva_start + (count_ * sizeof(nv_t));
 
   size_t n = 0;
-  for (headers_list::const_iterator iter = headers_.begin(); iter != headers_.end(); ++iter) {
-    auto& elem = *iter;
-    auto& h = *get<0>(elem);
-    auto& v = *get<1>(elem);
-    auto& f = get<2>(elem);
+  for (const auto& nv_pair: tmp_nv) {
+    auto header = nv_pair.first;
+    size_t header_len = header->Length();
+    header->WriteOneByte(isolate,
+        reinterpret_cast<uint8_t*>(header_contents),
+        0,
+        header_len,
+        v8::String::WriteOptions::NO_NULL_TERMINATION);
+    ada::idna::ascii_map(header_contents, header_len);
 
-    nva[n].name = reinterpret_cast<uint8_t*>(h.data.get());
-    nva[n].namelen = h.length;
-    nva[n].value = reinterpret_cast<uint8_t*>(v.data.get());
-    nva[n].valuelen = v.length;
-    nva[n].flags = f;
+    auto header_ptr = header_contents;
+    header_contents += header_len;
 
-    ++n;
+    auto header_sv = std::string_view(header_ptr, header_len);
+    auto header_sv_hash = std::hash<std::string_view>{}(header_sv);
+    bool isSingleValueHeader = http2_single_value_headers.contains(header_sv_hash);
+    uint8_t flags = neverIndex.contains(header_sv_hash)
+      ? Http2NoIndexNoCopyNameValue
+      : Http2NoCopyNameValue;
+
+    for (const auto& value: nv_pair.second) {
+      size_t value_len = value->Length();
+      value->WriteOneByte(isolate,
+          reinterpret_cast<uint8_t*>(header_contents),
+          0,
+          value_len,
+          v8::String::WriteOptions::NO_NULL_TERMINATION);
+
+      auto value_ptr = header_contents;
+      header_contents += value_len;
+
+      auto value_sv = std::string_view(value_ptr, value_len);
+
+      // all ':' are single value headers
+      if (header_sv[0] == ':') {
+        if (!VALIDATE_PSEUDO_HEADER(isolate, header_sv_hash, header_sv, header_type)) return;
+        if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, header_sv, header_sv_hash)) return;
+      } else if (header_sv.find_first_of(' ') != std::string::npos) {
+        THROW_ERR_INVALID_HTTP_TOKEN(isolate, "Header name must be a valid HTTP token [\"%s\"]", header_sv);
+        return;
+      } else {
+        if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, header_sv, header_sv_hash)) return;
+        if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, header_sv, header_sv_hash, value_sv)) return;
+      }
+
+      nva[n].name = reinterpret_cast<uint8_t*>(header_ptr);
+      nva[n].namelen = header_len;
+      nva[n].value = reinterpret_cast<uint8_t*>(value_ptr);
+      nva[n].valuelen = value_len;
+      nva[n].flags = flags;
+      ++n;
+    }
   }
 
   valid_ = true;

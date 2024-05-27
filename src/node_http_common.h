@@ -332,13 +332,10 @@ class NgHeaders {
     return count_;
   }
 
-  using headers_list = std::list<std::tuple<shared_str_ptr, unique_str_ptr, uint8_t>>;
-
  private:
   bool valid_;
   size_t count_;
-  headers_list headers_;
-  MaybeStackBuffer<char, 1024> buf_;
+  MaybeStackBuffer<char, 2048> buf_;
 };
 
 // The ng libraries use nearly identical
