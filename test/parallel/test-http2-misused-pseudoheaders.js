@@ -23,13 +23,28 @@ server.on('stream', common.mustCall((stream) => {
 
   stream.respond({}, { waitForTrailers: true });
 
-  stream.on('wantTrailers', () => {
-    assert.throws(() => {
-      stream.sendTrailers({ ':status': 'bar' });
-    }, {
-      code: 'ERR_HTTP2_INVALID_PSEUDOHEADER'
-    });
+  const onErr = common.expectsError({
+    code: 'ERR_HTTP2_INVALID_PSEUDOHEADER'
+  });
+
+  stream.once('error', (err) => {
+    console.error(err);
+    onErr(err);
     stream.close();
+  });
+
+  stream.on('wantTrailers', () => {
+    // stream.once('error', (err) => {
+    //   onErr(err);
+    //   stream.close();
+    // });
+    stream.sendTrailers({ ':status': 'bar' });
+    // assert.throws(() => {
+    //   stream.sendTrailers({ ':status': 'bar' });
+    // }, {
+    //   code: 'ERR_HTTP2_INVALID_PSEUDOHEADER'
+    // });
+    // stream.close();
   });
 
   stream.end('hello world');

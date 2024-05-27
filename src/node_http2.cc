@@ -1195,6 +1195,16 @@ int Http2Session::OnFrameSent(nghttp2_session* handle,
                               const nghttp2_frame* frame,
                               void* user_data) {
   Http2Session* session = static_cast<Http2Session*>(user_data);
+
+  auto hd = frame->hd;
+  nghttp2_frame_type frame_type = static_cast<nghttp2_frame_type>(hd.type);
+  if (frame_type == nghttp2_frame_type::NGHTTP2_HEADERS) {
+    auto stream = session->FindStream(hd.stream_id);
+    if (!stream->outgoing_headers_.empty()) {
+      stream->outgoing_headers_.pop();
+    }
+  }
+
   session->statistics_.frame_sent += 1;
   return 0;
 }
@@ -1990,7 +2000,7 @@ Http2Stream* Http2Session::SubmitRequest(
   Http2Scope h2scope(this);
   Http2Stream* stream = nullptr;
   Http2Stream::Provider::Stream prov(options);
-  *ret = nghttp2_submit_request(
+  *ret = nghttp2_submit_request2(
       session_.get(),
       &priority,
       headers.data(),
@@ -2178,6 +2188,7 @@ Http2Stream::Http2Stream(Http2Session* session,
 
   if (options & STREAM_OPTION_EMPTY_PAYLOAD)
     Shutdown();
+
   session->AddStream(this);
 }
 
@@ -2305,7 +2316,7 @@ int Http2Stream::SubmitResponse(const Http2Headers& headers, int options) {
     options |= STREAM_OPTION_EMPTY_PAYLOAD;
 
   Http2Stream::Provider::Stream prov(this, options);
-  int ret = nghttp2_submit_response(
+  int ret = nghttp2_submit_response2(
       session_->session(),
       id_,
       headers.data(),
@@ -2355,7 +2366,7 @@ int Http2Stream::SubmitTrailers(const Http2Headers& headers) {
   // to indicate that the stream is ready to be closed.
   if (headers.length() == 0) {
     Http2Stream::Provider::Stream prov(this, 0);
-    ret = nghttp2_submit_data(
+    ret = nghttp2_submit_data2(
         session_->session(),
         NGHTTP2_FLAG_END_STREAM,
         id_,
@@ -2915,13 +2926,21 @@ void Http2Stream::Respond(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[0]->IsObject());
   CHECK(args[1]->IsNumber());
 
+  HandleScope handle_scope(env->isolate());
   Local<Object> rawHeaders = args[0].As<Object>();
   int32_t options = args[1]->Int32Value(env->context()).ToChecked();
 
+  auto headers_ptr = std::make_shared<Http2Headers>(env, rawHeaders, http2_response);
+  if (!headers_ptr->isValid()) {
+    Debug(stream, "headers invalid");
+    return;
+  }
+
+  // store headers until we receive frame_sent / not_sent
+  stream->outgoing_headers_.push(headers_ptr);
+
   args.GetReturnValue().Set(
-      stream->SubmitResponse(
-          Http2Headers(env, rawHeaders, http2_response),
-          static_cast<int>(options)));
+      stream->SubmitResponse(*headers_ptr, static_cast<int>(options)));
   Debug(stream, "response submitted");
 }
 
@@ -2943,10 +2962,26 @@ void Http2Stream::Trailers(const FunctionCallbackInfo<Value>& args) {
   Http2Stream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.Holder());
 
+  HandleScope handle_scope(env->isolate());
   Local<Object> headers = args[0].As<Object>();
 
-  args.GetReturnValue().Set(
-      stream->SubmitTrailers(Http2Headers(env, headers, http2_trailer)));
+  Debug(stream, "preparing trailers");
+
+  std::shared_ptr<Http2Headers> trailers_ptr = std::make_shared<Http2Headers>(env, headers, http2_trailer);
+  if (!trailers_ptr->isValid()) {
+    Debug(stream, "trailers invalid, returning");
+    return;
+  }
+
+  // store headers until we receive frame_sent / not_sent
+  // but only if we actually have headers
+  if (trailers_ptr->length() > 0) {
+    stream->outgoing_headers_.push(trailers_ptr);
+  }
+
+  Debug(stream, "submitting trailers");
+
+  args.GetReturnValue().Set(stream->SubmitTrailers(*trailers_ptr));
 }
 
 // Grab the numeric id of the Http2Stream

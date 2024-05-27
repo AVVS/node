@@ -154,17 +154,15 @@ static const std::unordered_set<size_t> ng_valid_pseudo_headers{
 };
 
 inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
-        Environment*& env,
+        v8::Isolate*& isolate,
+        const std::string_view& header,
         const size_t& hash,
         const std::string_view& value) {
 
-  if (ng_forbidden_headers.contains(hash)) {
-    THROW_ERR_INVALID_ARG_VALUE(env, "invalid connection header");
-    return false;
-  }
-
-  if (hash == te_hash && value == "trailers") {
-    THROW_ERR_INVALID_ARG_VALUE(env, "invalid trailer header `te`");
+  if (ng_forbidden_headers.contains(hash) ||
+      (hash == te_hash && value == "trailers")) {
+    THROW_ERR_HTTP2_INVALID_CONNECTION_HEADERS(isolate,
+        "HTTP/1 Connection specific headers are forbidden: \"%s\"", header);
     return false;
   }
 
@@ -172,41 +170,40 @@ inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
 }
 
 // TODO: move strings to prehashed unordered_set, and search for hash
-inline bool VALIDATE_PSEUDO_HEADER(Environment*& env,
+inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate*& isolate,
                                   const size_t& hash,
+                                  const std::string_view& name,
                                   const http_headers_type& type) {
   switch (type) {
     case http2_request:
-      if (!ng_valid_pseudo_headers.contains(hash)) {
-        THROW_ERR_INVALID_ARG_VALUE(env, "ERR_HTTP2_INVALID_PSEUDOHEADER");
-        return false;
+      if (ng_valid_pseudo_headers.contains(hash)) {
+        return true;
       }
       break;
     case http2_response:
-      if (hash != status_hash) {
-        THROW_ERR_INVALID_ARG_VALUE(env, "ERR_HTTP2_INVALID_PSEUDOHEADER");
-        return false;
+      if (hash == status_hash) {
+        return true;
       }
       break;
-    case http2_trailer:
-      THROW_ERR_INVALID_ARG_VALUE(env, "ERR_HTTP2_INVALID_PSEUDOHEADER");
-      return false;
-      break;
+    case http2_trailer: break;
   }
 
-  return true;
+  Debug(Realm::GetCurrent(isolate)->env(), DebugCategory::HTTP2STREAM, "invalid pseudo header %s", name);
+  THROW_ERR_HTTP2_INVALID_PSEUDOHEADER(isolate, "\"%s\" is an invalid pseudoheader or is used incorrectly", name);
+  return false;
 }
 
-inline bool VALIDATE_SINGLES_HEADER(Environment*& env,
-                                    const bool& isSingleValueHeader,
+inline bool VALIDATE_SINGLES_HEADER(v8::Isolate*& isolate,
                                     std::unordered_set<size_t>& singles,
+                                    const bool& isSingleValueHeader,
+                                    const std::string_view& header,
                                     const size_t& header_hash) {
   if (!isSingleValueHeader) {
     return true;
   }
 
   if (singles.contains(header_hash)) {
-    THROW_ERR_INVALID_ARG_VALUE(env, "single value header contains multiple entries");
+    THROW_ERR_HTTP2_HEADER_SINGLE_VALUE(isolate, "Header field \"%s\" must only have a single value", header);
     return false;
   }
 
@@ -248,6 +245,12 @@ MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(
   return neverIndex;
 }
 
+static const nghttp2_nv_flag Http2NoIndexNoCopyNameValue = static_cast<nghttp2_nv_flag>(
+  NGHTTP2_NV_FLAG_NO_INDEX | NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE);
+
+static const nghttp2_nv_flag Http2NoCopyNameValue = static_cast<nghttp2_nv_flag>(
+  NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE);
+
 // TODO: bool -> enum {request, response, trailers} for correct asserts
 // 1. how to fast-lowercase header names?
 // 2. separate memory for ng structures and actual char* so we can directly write to it and not have
@@ -271,13 +274,17 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
                                  static_cast<v8::PropertyFilter>(v8::PropertyFilter::ONLY_ENUMERABLE | v8::PropertyFilter::SKIP_SYMBOLS),
                                  v8::IndexFilter::kSkipIndices,
                                  v8::KeyConversionMode::kNoNumbers).ToLocal(&keys)) {
+    valid_ = true;
     return;
   }
 
   uint32_t keys_length = keys->Length();
   if (keys_length == 0) {
+    valid_ = true;
     return;
   }
+
+  valid_ = false;
 
   // sort keys with : in front
   std::unordered_set<size_t> singles{};
@@ -308,22 +315,17 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
     auto str_view_hash = std::hash<std::string_view>{}(str_view);
     bool isSingleValueHeader = http2_single_value_headers.contains(str_view_hash);
     uint8_t flags = neverIndex.contains(str_view_hash)
-      ? nghttp2_nv_flag::NGHTTP2_NV_FLAG_NO_INDEX
-      : nghttp2_nv_flag::NGHTTP2_NV_FLAG_NONE;
+      ? Http2NoIndexNoCopyNameValue
+      : Http2NoCopyNameValue;
 
     // all ':' are single value headers
     if (str_view[0] == ':') {
-      if (!value_->IsString() && !value_->IsNumber()) {
-        THROW_ERR_INVALID_ARG_VALUE(env, "reserved header must be a string or a number");
-        return;
-      }
-
       if (!ToString(isolate, context, value_, value)) {
         continue;
       }
 
-      if (!VALIDATE_PSEUDO_HEADER(env, str_view_hash, header_type)) return;
-      if (!VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash)) return;
+      if (!VALIDATE_PSEUDO_HEADER(isolate, str_view_hash, str_view, header_type)) return;
+      if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, str_view, str_view_hash)) return;
 
       headers_.emplace_front(header, std::move(value), flags);
       value = nullptr;
@@ -331,7 +333,7 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
       ++count_;
       continue;
     } else if (str_view.find_first_of(' ') != std::string::npos) {
-      THROW_ERR_INVALID_ARG_VALUE(env, "header must not contain spaces");
+      THROW_ERR_INVALID_HTTP_TOKEN(isolate, "Header name must be a valid HTTP token [\"%s\"]", str_view);
       return;
     }
 
@@ -341,8 +343,8 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
         continue;
       }
 
-      if (!VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash)) return;
-      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(env, str_view_hash, value->data.get())) return;
+      if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, str_view, str_view_hash)) return;
+      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, str_view, str_view_hash, value->data.get())) return;
 
       headers_.emplace_back(header, std::move(value), flags);
       value = nullptr;
@@ -362,8 +364,10 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
         continue;
       }
 
-      if (!VALIDATE_SINGLES_HEADER(env, isSingleValueHeader, singles, str_view_hash)) return;
-      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(env, str_view_hash, value->data.get())) return;
+      if (!VALIDATE_SINGLES_HEADER(isolate, singles,
+        isSingleValueHeader, str_view, str_view_hash)) return;
+      if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate,
+        str_view, str_view_hash, value->data.get())) return;
 
       headers_.emplace_back(header, std::move(value), flags);
       value = nullptr;
@@ -395,7 +399,8 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
     ++n;
   }
 
-  Debug(env, DebugCategory::HTTP2STREAM, "headers prepared");
+  valid_ = true;
+  Debug(env, DebugCategory::HTTP2STREAM, "headers prepared\n");
 }
 
 size_t GetClientMaxHeaderPairs(size_t max_header_pairs) {
