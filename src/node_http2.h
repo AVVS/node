@@ -24,8 +24,6 @@
 
 namespace node {
 
-class ExternalReferenceRegistry;
-
 namespace http2 {
 
 // Constants in all caps are exported as user-facing constants
@@ -507,7 +505,7 @@ class Http2Stream : public AsyncWrap,
   size_t available_outbound_length_ = 0;
 
   // Outbound Headers
-  std::queue<std::shared_ptr<Http2Headers>> outgoing_headers_;
+  std::queue<std::unique_ptr<Http2Headers>> outgoing_headers_;
 
   Http2StreamListener stream_listener_;
 

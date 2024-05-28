@@ -1,9 +1,4 @@
 #include "node_http2.h"
-#include <algorithm>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
 #include "aliased_buffer-inl.h"
 #include "aliased_struct-inl.h"
 #include "debug_utils-inl.h"
@@ -17,6 +12,12 @@
 #include "node_revert.h"
 #include "stream_base-inl.h"
 #include "util-inl.h"
+
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace node {
 
@@ -2830,7 +2831,7 @@ void Http2Session::Request(const FunctionCallbackInfo<Value>& args) {
   Debug(session, "request submitted");
 
   int32_t ret = 0;
-  auto headers_ptr = std::make_shared<Http2Headers>(env, headers, http2_request);
+  auto headers_ptr = std::make_unique<Http2Headers>(env, headers, http2_request);
   Http2Stream* stream =
       session->Http2Session::SubmitRequest(
           Http2Priority(env, args[2], args[3], args[4]),
@@ -2933,16 +2934,16 @@ void Http2Stream::Respond(const FunctionCallbackInfo<Value>& args) {
   Local<Object> rawHeaders = args[0].As<Object>();
   int32_t options = args[1]->Int32Value(env->context()).ToChecked();
 
-  auto headers_ptr = std::make_shared<Http2Headers>(env, rawHeaders, http2_response);
+  auto headers_ptr = std::make_unique<Http2Headers>(env, rawHeaders, http2_response);
   if (!headers_ptr->isValid()) {
     Debug(stream, "headers invalid");
     return;
   }
 
   // store headers until we receive frame_sent / not_sent
-  stream->outgoing_headers_.push(headers_ptr);
   args.GetReturnValue().Set(
       stream->SubmitResponse(*headers_ptr, static_cast<int>(options)));
+  stream->outgoing_headers_.push(std::move(headers_ptr));
 
   Debug(stream, "response submitted");
 }
@@ -2957,7 +2958,7 @@ void Http2Stream::Info(const FunctionCallbackInfo<Value>& args) {
   HandleScope handle_scope(env->isolate());
   Local<Object> rawHeaders = args[0].As<Object>();
 
-  auto headers_ptr = std::make_shared<Http2Headers>(env, rawHeaders, http2_response);
+  auto headers_ptr = std::make_unique<Http2Headers>(env, rawHeaders, http2_response);
   if (!headers_ptr->isValid()) {
     Debug(stream, "info headers invalid, returning");
     return;
@@ -2980,7 +2981,7 @@ void Http2Stream::Trailers(const FunctionCallbackInfo<Value>& args) {
 
   Debug(stream, "preparing trailers");
 
-  auto trailers_ptr = std::make_shared<Http2Headers>(env, headers, http2_trailer);
+  auto trailers_ptr = std::make_unique<Http2Headers>(env, headers, http2_trailer);
   if (!trailers_ptr->isValid()) {
     Debug(stream, "trailers invalid, returning");
     return;
