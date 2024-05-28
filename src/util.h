@@ -365,6 +365,7 @@ inline void SwapBytes64(char* data, size_t nbytes);
 // tolower() is locale-sensitive.  Use ToLower() instead.
 inline char ToLower(char c);
 inline std::string ToLower(const std::string& in);
+inline std::string ToLowerStringView(const std::string_view& in);
 
 // toupper() is locale-sensitive.  Use ToUpper() instead.
 inline char ToUpper(char c);
@@ -779,8 +780,38 @@ inline v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
         .Check();                                                              \
   } while (0)
 
+// Variation on NODE_DEFINE_CONSTANT that sets a Symbol value.
+#define NODE_DEFINE_SYMBOL_CONSTANT(target, name, constant)                    \
+  do {                                                                         \
+    v8::Isolate* isolate = target->GetIsolate();                               \
+    v8::Local<v8::String> constant_name =                                      \
+        v8::String::NewFromUtf8(isolate, name).ToLocalChecked();               \
+    v8::Local<v8::Symbol> constant_value =                                     \
+        v8::Symbol::ForApi(isolate,                                            \
+            v8::String::NewFromUtf8(isolate, constant).ToLocalChecked());      \
+    v8::PropertyAttribute constant_attributes =                                \
+        static_cast<v8::PropertyAttribute>(v8::ReadOnly | v8::DontDelete);     \
+    target                                                                     \
+        ->DefineOwnProperty(isolate->GetCurrentContext(),                      \
+                            constant_name,                                     \
+                            constant_value,                                    \
+                            constant_attributes)                               \
+        .Check();                                                              \
+  } while (0)
+
 constexpr inline bool IsLittleEndian() {
   return std::endian::native == std::endian::little;
+}
+
+enum class Endianness { LITTLE, BIG };
+
+inline Endianness GetEndianness() {
+  // Constant-folded by the compiler.
+  const union {
+    uint8_t u8[2];
+    uint16_t u16;
+  } u = {{1, 0}};
+  return u.u16 == 1 ? Endianness::LITTLE : Endianness::BIG;
 }
 
 constexpr inline bool IsBigEndian() {

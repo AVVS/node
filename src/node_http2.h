@@ -16,11 +16,16 @@
 #include "node_perf.h"
 #include "stream_base.h"
 #include "string_bytes.h"
+#include "v8-fast-api-calls.h"
+#include "v8.h"
 
 #include <algorithm>
 #include <queue>
 
 namespace node {
+
+class ExternalReferenceRegistry;
+
 namespace http2 {
 
 // Constants in all caps are exported as user-facing constants
@@ -501,6 +506,9 @@ class Http2Stream : public AsyncWrap,
   std::queue<NgHttp2StreamWrite> queue_;
   size_t available_outbound_length_ = 0;
 
+  // Outbound Headers
+  std::queue<std::shared_ptr<Http2Headers>> outgoing_headers_;
+
   Http2StreamListener stream_listener_;
 
   friend class Http2Session;
@@ -512,14 +520,14 @@ class Http2Stream::Provider {
   explicit Provider(int options);
   virtual ~Provider();
 
-  nghttp2_data_provider* operator*() {
+  nghttp2_data_provider2* operator*() {
     return !empty_ ? &provider_ : nullptr;
   }
 
   class FD;
   class Stream;
  protected:
-  nghttp2_data_provider provider_;
+  nghttp2_data_provider2 provider_;
 
  private:
   bool empty_ = false;
