@@ -317,11 +317,11 @@ class NgHeaders {
   ~NgHeaders() = default;
 
   const nv_t* operator*() const {
-    return reinterpret_cast<const nv_t*>(*buf_);
+    return reinterpret_cast<const nv_t*>(*buf_) + offset_;
   }
 
   const nv_t* data() const {
-    return reinterpret_cast<const nv_t*>(*buf_);
+    return reinterpret_cast<const nv_t*>(*buf_) + offset_;
   }
 
   bool isValid() const {
@@ -335,6 +335,7 @@ class NgHeaders {
  private:
   bool valid_;
   size_t count_;
+  size_t offset_ = 0;
   MaybeStackBuffer<char, 2048> buf_;
 };
 

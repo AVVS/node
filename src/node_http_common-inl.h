@@ -86,6 +86,7 @@ static const std::unordered_set<size_t> ng_valid_pseudo_headers{
   std::hash<std::string>{}(":path"),
   std::hash<std::string>{}(":protocol")
 };
+static const size_t ng_valid_pseudo_headers_size = ng_valid_pseudo_headers.size();
 
 MUST_USE_RESULT inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
         v8::Isolate*& isolate,
@@ -311,22 +312,21 @@ NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers,
     storage_required += header->Length();
   }
 
-  // pre-allocate storage, we may have _more_ storage than required
-  // we allocate one extra chunk for sorting
-  auto nv_storage = (count_ + 1) * sizeof(nv_t);
+  // pre-allocate storage,
+  // we will also allocate extra storage for all possible pseudo headers
+  size_t nv_storage = (count_ + ng_valid_pseudo_headers_size) * sizeof(nv_t);
 
   buf_.AllocateSufficientStorage((alignof(nv_t) - 1) +
                                  nv_storage +
                                  storage_required);
 
   char* nva_start = AlignUp(buf_.out(), alignof(nv_t));
-  nv_t* const nva = reinterpret_cast<nv_t*>(nva_start);
+  nv_t* const nva_pseudo = reinterpret_cast<nv_t*>(nva_start);
+  nv_t* const nva = nva_pseudo + ng_valid_pseudo_headers_size;
   char* header_contents = nva_start + nv_storage;
 
   size_t n = 0;
-  // size_t front = 0;
-  // size_t back = count_ - 1;
-  std::vector<size_t> positions{};
+  size_t n_ps = 0;
 
   for (const auto& nv_pair: tmp_nv) {
     auto header = nv_pair.first;
@@ -364,49 +364,41 @@ NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers,
       // all ':' are single value headers
       if (header_sv[0] == ':') {
         if (!VALIDATE_PSEUDO_HEADER(isolate, header_sv_hash, header_sv, header_type)) return;
-        positions.push_back(n);
-      } else if (header_sv.find_first_of(' ') != std::string::npos) {
-        THROW_ERR_INVALID_HTTP_TOKEN(isolate, "Header name must be a valid HTTP token [\"%s\"]", header_sv);
-        return;
-      } else if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, header_sv, header_sv_hash, value_sv)) {
-        return;
+        if (!VALIDATE_SINGLES_HEADER(isolate, singles, header_sv, header_sv_hash)) return;
+
+        nva_pseudo[n_ps].name = reinterpret_cast<uint8_t*>(header_ptr);
+        nva_pseudo[n_ps].namelen = header_len;
+        nva_pseudo[n_ps].value = reinterpret_cast<uint8_t*>(value_ptr);
+        nva_pseudo[n_ps].valuelen = value_len;
+        nva_pseudo[n_ps].flags = flags;
+        ++n_ps;
+      } else {
+        if (header_sv.find_first_of(' ') != std::string::npos) {
+          THROW_ERR_INVALID_HTTP_TOKEN(isolate, "Header name must be a valid HTTP token [\"%s\"]", header_sv);
+          return;
+        }
+
+        if ((isSingleValueHeader &&
+              !VALIDATE_SINGLES_HEADER(isolate, singles, header_sv, header_sv_hash)) ||
+            !VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, header_sv, header_sv_hash, value_sv)) {
+          return;
+        }
+
+        nva[n].name = reinterpret_cast<uint8_t*>(header_ptr);
+        nva[n].namelen = header_len;
+        nva[n].value = reinterpret_cast<uint8_t*>(value_ptr);
+        nva[n].valuelen = value_len;
+        nva[n].flags = flags;
+        ++n;
       }
-
-      if (isSingleValueHeader &&
-          !VALIDATE_SINGLES_HEADER(isolate, singles, header_sv, header_sv_hash)) {
-        return;
-      }
-
-      nva[n].name = reinterpret_cast<uint8_t*>(header_ptr);
-      nva[n].namelen = header_len;
-      nva[n].value = reinterpret_cast<uint8_t*>(value_ptr);
-      nva[n].valuelen = value_len;
-      nva[n].flags = flags;
-
-      ++n;
     }
   }
 
-  // sort nva at this point (?)
-  if (positions.size() > 0) {
-    n = 0;
-    auto temp_ptr = static_cast<void*>(&nva[count_]);
-    for (const auto& position: positions) {
-      if (position > n) {
-        // copy struct memory to an "extra" slot
-        // copy memory from position to current slot
-        // copy the memory back from extra slot
-        auto n_ptr = static_cast<void*>(&nva[n]);
-        auto pos_ptr = static_cast<void*>(&nva[position]);
-
-        memcpy(temp_ptr, n_ptr, sizeof(nv_t));
-        memcpy(n_ptr, pos_ptr, sizeof(nv_t));
-        memcpy(pos_ptr, temp_ptr, sizeof(nv_t));
-      }
-      ++n;
-    }
+  if (n_ps > 0 && n_ps < ng_valid_pseudo_headers_size) {
+    std::memmove(nva - n_ps, nva_pseudo, n_ps * sizeof(nv_t));
   }
 
+  offset_ = ng_valid_pseudo_headers_size - n_ps;
   valid_ = true;
   Debug(env, DebugCategory::HTTP2STREAM, "headers prepared\n");
 }
