@@ -121,13 +121,8 @@ MUST_USE_RESULT inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate*& isolate,
 
 MUST_USE_RESULT inline bool VALIDATE_SINGLES_HEADER(v8::Isolate*& isolate,
                                     std::unordered_set<size_t>& singles,
-                                    const bool& isSingleValueHeader,
                                     const std::string_view& header,
                                     const size_t& header_hash) {
-  if (!isSingleValueHeader) {
-    return true;
-  }
-
   if (singles.contains(header_hash)) {
     THROW_ERR_HTTP2_HEADER_SINGLE_VALUE(isolate, "Header field \"%s\" must only have a single value", header);
     return false;
@@ -317,17 +312,21 @@ NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers,
   }
 
   // pre-allocate storage, we may have _more_ storage than required
+  // we allocate one extra chunk for sorting
+  auto nv_storage = (count_ + 1) * sizeof(nv_t);
+
   buf_.AllocateSufficientStorage((alignof(nv_t) - 1) +
-                                 count_ * sizeof(nv_t) +
+                                 nv_storage +
                                  storage_required);
 
   char* nva_start = AlignUp(buf_.out(), alignof(nv_t));
   nv_t* const nva = reinterpret_cast<nv_t*>(nva_start);
-  char* header_contents = nva_start + (count_ * sizeof(nv_t));
+  char* header_contents = nva_start + nv_storage;
 
   size_t n = 0;
-  size_t front = 0;
-  size_t back = count_ - 1;
+  // size_t front = 0;
+  // size_t back = count_ - 1;
+  std::vector<size_t> positions{};
 
   for (const auto& nv_pair: tmp_nv) {
     auto header = nv_pair.first;
@@ -349,8 +348,6 @@ NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers,
       ? Http2NoIndexNoCopyNameValue
       : Http2NoCopyNameValue;
 
-    // std::vector<size_t> positions{};
-
     for (const auto& value: nv_pair.second) {
       size_t value_len = value->Length();
       value->WriteOneByte(isolate,
@@ -367,15 +364,17 @@ NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers,
       // all ':' are single value headers
       if (header_sv[0] == ':') {
         if (!VALIDATE_PSEUDO_HEADER(isolate, header_sv_hash, header_sv, header_type)) return;
-        if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, header_sv, header_sv_hash)) return;
-        n = front++;
+        positions.push_back(n);
       } else if (header_sv.find_first_of(' ') != std::string::npos) {
         THROW_ERR_INVALID_HTTP_TOKEN(isolate, "Header name must be a valid HTTP token [\"%s\"]", header_sv);
         return;
-      } else {
-        if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, header_sv, header_sv_hash)) return;
-        if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, header_sv, header_sv_hash, value_sv)) return;
-        n = back--;
+      } else if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, header_sv, header_sv_hash, value_sv)) {
+        return;
+      }
+
+      if (isSingleValueHeader &&
+          !VALIDATE_SINGLES_HEADER(isolate, singles, header_sv, header_sv_hash)) {
+        return;
       }
 
       nva[n].name = reinterpret_cast<uint8_t*>(header_ptr);
@@ -383,27 +382,29 @@ NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers,
       nva[n].value = reinterpret_cast<uint8_t*>(value_ptr);
       nva[n].valuelen = value_len;
       nva[n].flags = flags;
+
+      ++n;
     }
+  }
 
-    // sort nva at this point (?)
-    // if (positions.size() > 0) {
-    //   n = 0;
-    //   auto temp_ptr = reinterpret_cast<void*>(&nva[count_]);
-    //   for (const auto& position: positions) {
-    //     if (position > n) {
-    //       // copy struct memory to an "extra" slot
-    //       // copy memory from position to current slot
-    //       // copy the memory back from extra slot
-    //       auto n_ptr = reinterpret_cast<void*>(&nva[n]);
-    //       auto pos_ptr = reinterpret_cast<void*>(&nva[position]);
+  // sort nva at this point (?)
+  if (positions.size() > 0) {
+    n = 0;
+    auto temp_ptr = static_cast<void*>(&nva[count_]);
+    for (const auto& position: positions) {
+      if (position > n) {
+        // copy struct memory to an "extra" slot
+        // copy memory from position to current slot
+        // copy the memory back from extra slot
+        auto n_ptr = static_cast<void*>(&nva[n]);
+        auto pos_ptr = static_cast<void*>(&nva[position]);
 
-    //       memcpy(temp_ptr, n_ptr, sizeof(nv_t));
-    //       memcpy(n_ptr, pos_ptr, sizeof(nv_t));
-    //       memcpy(pos_ptr, temp_ptr, sizeof(nv_t));
-    //     }
-    //     ++n;
-    //   }
-    // }
+        memcpy(temp_ptr, n_ptr, sizeof(nv_t));
+        memcpy(n_ptr, pos_ptr, sizeof(nv_t));
+        memcpy(pos_ptr, temp_ptr, sizeof(nv_t));
+      }
+      ++n;
+    }
   }
 
   valid_ = true;
