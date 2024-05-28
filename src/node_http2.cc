@@ -2824,16 +2824,17 @@ void Http2Session::Request(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&session, args.Holder());
   Environment* env = session->env();
 
-  Local<Array> headers = args[0].As<Array>();
+  Local<Object> headers = args[0].As<Object>();
   int32_t options = args[1]->Int32Value(env->context()).ToChecked();
 
   Debug(session, "request submitted");
 
   int32_t ret = 0;
+  auto headers_ptr = std::make_shared<Http2Headers>(env, headers, http2_request);
   Http2Stream* stream =
       session->Http2Session::SubmitRequest(
           Http2Priority(env, args[2], args[3], args[4]),
-          Http2Headers(env, headers),
+          *headers_ptr,
           &ret,
           static_cast<int>(options));
 
@@ -2844,6 +2845,7 @@ void Http2Session::Request(const FunctionCallbackInfo<Value>& args) {
 
   Debug(session, "request submitted, new stream id %d", stream->id());
   args.GetReturnValue().Set(stream->object());
+  stream->outgoing_headers_.push(std::move(headers_ptr));
 }
 
 // Submits a GOAWAY frame to signal that the Http2Session is in the process
@@ -2953,16 +2955,16 @@ void Http2Stream::Info(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.Holder());
 
   HandleScope handle_scope(env->isolate());
-  Local<Object> headers = args[0].As<Object>();
+  Local<Object> rawHeaders = args[0].As<Object>();
 
-  auto headers_ptr = std::make_shared<Http2Headers>(env, headers, http2_response);
+  auto headers_ptr = std::make_shared<Http2Headers>(env, rawHeaders, http2_response);
   if (!headers_ptr->isValid()) {
     Debug(stream, "info headers invalid, returning");
     return;
   }
 
-  stream->outgoing_headers_.push(headers_ptr);
   args.GetReturnValue().Set(stream->SubmitInfo(*headers_ptr));
+  stream->outgoing_headers_.push(std::move(headers_ptr));
 
   Debug(stream, "info headers submitted");
 }
@@ -2978,21 +2980,21 @@ void Http2Stream::Trailers(const FunctionCallbackInfo<Value>& args) {
 
   Debug(stream, "preparing trailers");
 
-  std::shared_ptr<Http2Headers> trailers_ptr = std::make_shared<Http2Headers>(env, headers, http2_trailer);
+  auto trailers_ptr = std::make_shared<Http2Headers>(env, headers, http2_trailer);
   if (!trailers_ptr->isValid()) {
     Debug(stream, "trailers invalid, returning");
     return;
   }
 
+
+  Debug(stream, "submitting trailers");
+  args.GetReturnValue().Set(stream->SubmitTrailers(*trailers_ptr));
+
   // store headers until we receive frame_sent / not_sent
   // but only if we actually have headers
   if (trailers_ptr->length() > 0) {
-    stream->outgoing_headers_.push(trailers_ptr);
+    stream->outgoing_headers_.push(std::move(trailers_ptr));
   }
-
-  Debug(stream, "submitting trailers");
-
-  args.GetReturnValue().Set(stream->SubmitTrailers(*trailers_ptr));
 }
 
 // Grab the numeric id of the Http2Stream
@@ -3032,6 +3034,7 @@ void Http2Stream::PushPromise(const FunctionCallbackInfo<Value>& args) {
     Debug(parent, "failed to create push stream: %d", ret);
     return args.GetReturnValue().Set(ret);
   }
+
   Debug(parent, "push stream %d created", stream->id());
   args.GetReturnValue().Set(stream->object());
 }

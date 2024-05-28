@@ -107,22 +107,14 @@ MUST_USE_RESULT inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate*& isolate,
                                   const size_t& hash,
                                   const std::string_view& name,
                                   const http_headers_type& type) {
-  switch (type) {
-    case http2_request:
-      if (ng_valid_pseudo_headers.contains(hash)) {
-        return true;
-      }
-      break;
-    case http2_response:
-      if (hash == status_hash) {
-        return true;
-      }
-      break;
-    case http2_trailer: break;
+  if (type == http2_request && ng_valid_pseudo_headers.contains(hash)) {
+    return true;
   }
 
-  Debug(Realm::GetCurrent(isolate)->env(), DebugCategory::HTTP2STREAM,
-    "invalid pseudo header %s - %d vs %d\n", name, hash, status_hash);
+  if (type == http2_response && hash == status_hash) {
+    return true;
+  }
+
   THROW_ERR_HTTP2_INVALID_PSEUDOHEADER(isolate, "\"%s\" is an invalid pseudoheader or is used incorrectly", name);
   return false;
 }
@@ -219,10 +211,10 @@ inline void GetFirstChar(
   str->WriteOneByte(isolate, reinterpret_cast<uint8_t*>(buf), 0, 1, v8::String::WriteOptions::NO_NULL_TERMINATION);
 }
 
-static const nghttp2_nv_flag Http2NoIndexNoCopyNameValue = static_cast<nghttp2_nv_flag>(
+static constexpr nghttp2_nv_flag Http2NoIndexNoCopyNameValue = static_cast<nghttp2_nv_flag>(
   NGHTTP2_NV_FLAG_NO_INDEX | NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE);
 
-static const nghttp2_nv_flag Http2NoCopyNameValue = static_cast<nghttp2_nv_flag>(
+static constexpr nghttp2_nv_flag Http2NoCopyNameValue = static_cast<nghttp2_nv_flag>(
   NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE);
 
 // TODO: bool -> enum {request, response, trailers} for correct asserts
@@ -234,7 +226,7 @@ static const nghttp2_nv_flag Http2NoCopyNameValue = static_cast<nghttp2_nv_flag>
 // 5. less verbose object iteration, helpers for value processing? same code is repeated for non-array values
 // 6. unordered_set - is this what's used? this is give or take JS copy-paste, so maybe not great in c++ ?
 template <typename T>
-NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_headers_type header_type) {
+NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers, const http_headers_type& header_type) {
   v8::Local<v8::Array> keys;
   auto isolate = env->isolate();
   auto context = env->context();
@@ -273,11 +265,6 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
   size_t storage_required = 0;
   tmp_nv.reserve(keys_length);
 
-  // contains pseudo_buffer
-  std::unique_ptr<char[]> cbuf(new char[1]);
-  char* buf = cbuf.get();
-  bool is_pseudo;
-
   // pre-sort headers & results into 2 lists
   // verify basic header information
   for (uint32_t i = 0; i < keys_length; ++i) {
@@ -299,21 +286,12 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
         continue;
       }
 
-      // pseudo headers can't have multiple values, so we only check singular values
-      GetFirstChar(isolate, header, buf);
-      is_pseudo = buf[0] == ':';
-
       storage_required += value->Length();
-      if (is_pseudo) {
-        tmp_nv.emplace(tmp_nv.begin(), header, std::vector<v8::Local<v8::String>>{value});
-      } else {
-        tmp_nv.emplace_back(header, std::vector<v8::Local<v8::String>>{value});
-      }
+      tmp_nv.emplace_back(header, std::vector<v8::Local<v8::String>>{value});
       ++count_;
     } else {
       v8::Local<v8::Array> arrValue = value_.As<v8::Array>();
       auto l = arrValue->Length();
-      bool allocated = false;
       std::vector<v8::Local<v8::String>> val_vec{};
       val_vec.reserve(l);
 
@@ -323,17 +301,16 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
           continue;
         }
 
-        allocated = true;
         storage_required += value->Length();
         val_vec.push_back(value);
         ++count_;
       }
 
-      if (!allocated) {
+      if (val_vec.size() > 0) {
+        tmp_nv.emplace_back(header, val_vec);
+      } else {
         continue;
       }
-
-      tmp_nv.emplace_back(header, val_vec);
     }
 
     storage_required += header->Length();
@@ -349,6 +326,9 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
   char* header_contents = nva_start + (count_ * sizeof(nv_t));
 
   size_t n = 0;
+  size_t front = 0;
+  size_t back = count_ - 1;
+
   for (const auto& nv_pair: tmp_nv) {
     auto header = nv_pair.first;
     size_t header_len = header->Length();
@@ -369,6 +349,8 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
       ? Http2NoIndexNoCopyNameValue
       : Http2NoCopyNameValue;
 
+    // std::vector<size_t> positions{};
+
     for (const auto& value: nv_pair.second) {
       size_t value_len = value->Length();
       value->WriteOneByte(isolate,
@@ -386,12 +368,14 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
       if (header_sv[0] == ':') {
         if (!VALIDATE_PSEUDO_HEADER(isolate, header_sv_hash, header_sv, header_type)) return;
         if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, header_sv, header_sv_hash)) return;
+        n = front++;
       } else if (header_sv.find_first_of(' ') != std::string::npos) {
         THROW_ERR_INVALID_HTTP_TOKEN(isolate, "Header name must be a valid HTTP token [\"%s\"]", header_sv);
         return;
       } else {
         if (!VALIDATE_SINGLES_HEADER(isolate, singles, isSingleValueHeader, header_sv, header_sv_hash)) return;
         if (!VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(isolate, header_sv, header_sv_hash, value_sv)) return;
+        n = back--;
       }
 
       nva[n].name = reinterpret_cast<uint8_t*>(header_ptr);
@@ -399,8 +383,27 @@ NgHeaders<T>::NgHeaders(Environment*& env, v8::Local<v8::Object> headers, http_h
       nva[n].value = reinterpret_cast<uint8_t*>(value_ptr);
       nva[n].valuelen = value_len;
       nva[n].flags = flags;
-      ++n;
     }
+
+    // sort nva at this point (?)
+    // if (positions.size() > 0) {
+    //   n = 0;
+    //   auto temp_ptr = reinterpret_cast<void*>(&nva[count_]);
+    //   for (const auto& position: positions) {
+    //     if (position > n) {
+    //       // copy struct memory to an "extra" slot
+    //       // copy memory from position to current slot
+    //       // copy the memory back from extra slot
+    //       auto n_ptr = reinterpret_cast<void*>(&nva[n]);
+    //       auto pos_ptr = reinterpret_cast<void*>(&nva[position]);
+
+    //       memcpy(temp_ptr, n_ptr, sizeof(nv_t));
+    //       memcpy(n_ptr, pos_ptr, sizeof(nv_t));
+    //       memcpy(pos_ptr, temp_ptr, sizeof(nv_t));
+    //     }
+    //     ++n;
+    //   }
+    // }
   }
 
   valid_ = true;
