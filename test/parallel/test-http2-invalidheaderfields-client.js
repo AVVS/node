@@ -9,11 +9,7 @@ const server1 = http2.createServer();
 server1.listen(0, common.mustCall(() => {
   const session = http2.connect(`http://localhost:${server1.address().port}`);
   // Check for req headers
-  assert.throws(() => {
-    session.request({ 'no underscore': 123 });
-  }, {
-    code: 'ERR_INVALID_HTTP_TOKEN'
-  });
+  session.request({ 'no underscore': 123 });
   session.on('error', common.mustCall((e) => {
     assert.strictEqual(e.code, 'ERR_INVALID_HTTP_TOKEN');
     server1.close();
