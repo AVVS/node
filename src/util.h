@@ -365,7 +365,6 @@ inline void SwapBytes64(char* data, size_t nbytes);
 // tolower() is locale-sensitive.  Use ToLower() instead.
 inline char ToLower(char c);
 inline std::string ToLower(const std::string& in);
-inline std::string ToLowerStringView(const std::string_view& in);
 
 // toupper() is locale-sensitive.  Use ToUpper() instead.
 inline char ToUpper(char c);
@@ -801,17 +800,6 @@ inline v8::MaybeLocal<v8::Value> ToV8Value(v8::Local<v8::Context> context,
 
 constexpr inline bool IsLittleEndian() {
   return std::endian::native == std::endian::little;
-}
-
-enum class Endianness { LITTLE, BIG };
-
-inline Endianness GetEndianness() {
-  // Constant-folded by the compiler.
-  const union {
-    uint8_t u8[2];
-    uint16_t u16;
-  } u = {{1, 0}};
-  return u.u16 == 1 ? Endianness::LITTLE : Endianness::BIG;
 }
 
 constexpr inline bool IsBigEndian() {

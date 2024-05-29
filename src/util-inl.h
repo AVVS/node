@@ -294,11 +294,6 @@ std::string ToLower(const std::string& in) {
   return out;
 }
 
-inline void ToLowerInPlace(std::string& in) {
-  for (size_t i = 0; i < in.size(); ++i)
-    in[i] = ToLower(in[i]);
-}
-
 char ToUpper(char c) {
   return std::toupper(c, std::locale::classic());
 }

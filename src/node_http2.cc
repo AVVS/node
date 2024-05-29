@@ -1149,6 +1149,21 @@ uint32_t TranslateNghttp2ErrorCode(const int libErrorCode) {
   }
 }
 
+inline void Http2Session::RemoveHeadersReference(const nghttp2_frame_hd& hd) {
+  BaseObjectPtr<Http2Stream> stream = this->FindStream(hd.stream_id);
+
+  // stream may have closed somehow by this point, but given that we have just
+  // sent out a headers block it should exist
+  if (UNLIKELY(!stream)) {
+    return;
+  }
+
+  if (!stream->outgoing_headers_.empty()) {
+    stream->outgoing_headers_.pop();
+    Debug(stream->env(), DebugCategory::HTTP2STREAM, "frame sent on %d\n", hd.stream_id);
+  }
+}
+
 // If nghttp2 is unable to send a queued up frame, it will call this callback
 // to let us know. If the failure occurred because we are in the process of
 // closing down the session or stream, we go ahead and ignore it. We don't
@@ -1163,6 +1178,10 @@ int Http2Session::OnFrameNotSent(nghttp2_session* handle,
   Environment* env = session->env();
   Debug(session, "frame type %d was not sent, code: %d",
         frame->hd.type, error_code);
+
+  if (frame->hd.type == nghttp2_frame_type::NGHTTP2_HEADERS) {
+    session->RemoveHeadersReference(frame->hd);
+  }
 
   // Do not report if the frame was not sent due to the session closing
   if (error_code == NGHTTP2_ERR_SESSION_CLOSING ||
@@ -1197,14 +1216,8 @@ int Http2Session::OnFrameSent(nghttp2_session* handle,
                               void* user_data) {
   Http2Session* session = static_cast<Http2Session*>(user_data);
 
-  auto hd = frame->hd;
-  nghttp2_frame_type frame_type = static_cast<nghttp2_frame_type>(hd.type);
-  if (frame_type == nghttp2_frame_type::NGHTTP2_HEADERS) {
-    auto stream = session->FindStream(hd.stream_id);
-    if (!stream->outgoing_headers_.empty()) {
-      stream->outgoing_headers_.pop();
-      Debug(stream->env(), DebugCategory::HTTP2STREAM, "frame sent on %d\n", hd.stream_id);
-    }
+  if (frame->hd.type == nghttp2_frame_type::NGHTTP2_HEADERS) {
+    session->RemoveHeadersReference(frame->hd);
   }
 
   session->statistics_.frame_sent += 1;
@@ -2832,6 +2845,11 @@ void Http2Session::Request(const FunctionCallbackInfo<Value>& args) {
 
   int32_t ret = 0;
   auto headers_ptr = std::make_unique<Http2Headers>(env, headers, http2_request);
+  if (!headers_ptr->isValid()) {
+    // no need to set return value is we've thrown an exception
+    return;
+  }
+
   Http2Stream* stream =
       session->Http2Session::SubmitRequest(
           Http2Priority(env, args[2], args[3], args[4]),

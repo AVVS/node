@@ -813,6 +813,7 @@ class Http2Session : public AsyncWrap,
   void HandleOriginFrame(const nghttp2_frame* frame);
 
   void DecrefHeaders(const nghttp2_frame* frame);
+  inline void RemoveHeadersReference(const nghttp2_frame_hd& hd);
 
   // nghttp2 callbacks
   static int OnBeginHeadersCallback(

@@ -13,6 +13,13 @@
 
 namespace node {
 
+using v8::Symbol;
+using v8::Local;
+using v8::Object;
+using v8::Array;
+using v8::String;
+using v8::Value;
+
 template <typename T>
 NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Array> headers) {
   v8::Local<v8::Value> header_string =
@@ -90,9 +97,9 @@ static const size_t ng_valid_pseudo_headers_size = ng_valid_pseudo_headers.size(
 
 MUST_USE_RESULT inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
         v8::Isolate*& isolate,
-        const std::string_view& header,
-        const size_t& hash,
-        const std::string_view& value) {
+        const std::string_view header,
+        const size_t hash,
+        const std::string_view value) {
 
   if (ng_forbidden_headers.contains(hash) ||
       (hash == te_hash && value == "trailers")) {
@@ -104,10 +111,10 @@ MUST_USE_RESULT inline bool VALIDATE_FOR_ILLEGAL_CONNECTION_SPECIFIC_HEADER(
   return true;
 }
 
-MUST_USE_RESULT inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate*& isolate,
-                                  const size_t& hash,
-                                  const std::string_view& name,
-                                  const http_headers_type& type) {
+MUST_USE_RESULT inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate* isolate,
+                                                   const size_t hash,
+                                                   const std::string_view name,
+                                                   const http_headers_type type) {
   if (type == http2_request && ng_valid_pseudo_headers.contains(hash)) {
     return true;
   }
@@ -120,10 +127,10 @@ MUST_USE_RESULT inline bool VALIDATE_PSEUDO_HEADER(v8::Isolate*& isolate,
   return false;
 }
 
-MUST_USE_RESULT inline bool VALIDATE_SINGLES_HEADER(v8::Isolate*& isolate,
-                                    std::unordered_set<size_t>& singles,
-                                    const std::string_view& header,
-                                    const size_t& header_hash) {
+MUST_USE_RESULT inline bool VALIDATE_SINGLES_HEADER(v8::Isolate* isolate,
+                                                    std::unordered_set<size_t>& singles,
+                                                    const std::string_view header,
+                                                    const size_t header_hash) {
   if (singles.contains(header_hash)) {
     THROW_ERR_HTTP2_HEADER_SINGLE_VALUE(isolate, "Header field \"%s\" must only have a single value", header);
     return false;
@@ -133,11 +140,10 @@ MUST_USE_RESULT inline bool VALIDATE_SINGLES_HEADER(v8::Isolate*& isolate,
   return true;
 }
 
-MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
-                                     const v8::Local<v8::Context>& context,
-                                     const v8::Local<v8::Value>& in,
-                                     v8::Local<v8::String>* out) {
-  v8::Local<v8::String> str_;
+MUST_USE_RESULT inline bool ToString(const Local<v8::Context>& context,
+                                     const Local<Value>& in,
+                                     Local<v8::String>* out) {
+  Local<v8::String> str_;
   if (in->IsString()) {
     str_ = in.As<v8::String>();
   } else if (!in->ToString(context).ToLocal(&str_)) {
@@ -155,56 +161,72 @@ MUST_USE_RESULT inline bool ToString(v8::Isolate*& isolate,
 
 MUST_USE_RESULT inline std::unordered_set<size_t> GetSensitiveHeaders(
     v8::Isolate*& isolate,
-    const v8::Local<v8::Context>& context,
-    const v8::Local<v8::Object>& headers) {
+    const Local<v8::Context>& context,
+    const Local<Object>& headers) {
 
   std::unordered_set<size_t> neverIndex{};
 
-  // TODO: use #define / constants ? -- whats the actual convention to do it in c++?
-  auto kSensitiveHeaders = v8::Symbol::ForApi(isolate,
+  auto kSensitiveHeaders = Symbol::ForApi(isolate,
       FIXED_ONE_BYTE_STRING(isolate, "nodejs.http2.sensitiveHeaders"));
 
   // construct sensitive headers index
-  v8::Local<v8::Value> maybeNeverIndex;
-  v8::Local<v8::Value> val;
-  v8::Local<v8::String> header;
+  Local<Value> maybeNeverIndex;
 
-  if (headers->Get(context, kSensitiveHeaders).ToLocal(&maybeNeverIndex) &&
-      maybeNeverIndex->IsArray()) {
-    auto neverIndexArr = maybeNeverIndex.As<v8::Array>();
-    MaybeStackBuffer<char, 64> storage{};
+  // Headers object may contain an array of header names that are not meant
+  // to be indexed for compression purposes (because they are of sensitive nature).
+  // That list of header names is passed on via headers[kSensitiveHeaders] on the
+  // javascript side. Here we retrieve that array of header names, normalize header names (lowercase)
+  // and populate unordered set with hashes of respective values
+  // Utf8Value is not used because it allocated char[1024] by default and it's typically an overkill for
+  // a header name
+  if (!headers->Get(context, kSensitiveHeaders).ToLocal(&maybeNeverIndex) ||
+      !maybeNeverIndex->IsArray()) {
+    return neverIndex;
+  }
 
-    for (uint32_t i = 0, l = neverIndexArr->Length(); i < l; ++i) {
-      if (!neverIndexArr->Get(context, i).ToLocal(&val) || !val->IsString()) {
-        continue;
-      }
+  auto neverIndexArr = maybeNeverIndex.As<Array>();
+  Local<Value> val;
+  Local<String> header;
+  MaybeStackBuffer<char, 64> storage{};
+  storage.SetLength(64);
+  auto buf = storage.out();
 
-      if (!ToString(isolate, context, val, &header)) {
-        continue;
-      }
-
-      size_t str_len = header->Length();
-      storage.AllocateSufficientStorage(str_len);
-      auto buf = storage.out();
-      header->WriteOneByte(isolate,
-          reinterpret_cast<uint8_t*>(buf),
-          0,
-          str_len,
-          v8::String::WriteOptions::NO_NULL_TERMINATION);
-      ada::idna::ascii_map(buf, str_len);
-
-      neverIndex.insert(std::hash<std::string_view>{}(std::string_view(buf, str_len)));
+  for (uint32_t i = 0, l = neverIndexArr->Length(); i < l; ++i) {
+    // header names must be strings, we avoid malformed header names
+    if (!neverIndexArr->Get(context, i).ToLocal(&val) ||
+        !val->IsString()) {
+      continue;
     }
+
+    // verify string is one-byte and extract to local value
+    if (!ToString(context, val, &header)) {
+      continue;
+    }
+
+    size_t str_len = header->Length();
+
+    // if we exceed 64 bytes then allocation will into heap and that will change
+      // pointer
+    if (str_len > 64) {
+      storage.AllocateSufficientStorage(str_len);
+      buf = storage.out();
+    }
+
+    // use temporary buffer into which we will write one-byte string
+    header->WriteOneByte(isolate,
+        reinterpret_cast<uint8_t*>(buf),
+        0,
+        str_len,
+        v8::String::WriteOptions::NO_NULL_TERMINATION);
+
+    // lowercase for normalization
+    ada::idna::ascii_map(buf, str_len);
+
+    // add hash to the index
+    neverIndex.insert(std::hash<std::string_view>{}(std::string_view(buf, str_len)));
   }
 
   return neverIndex;
-}
-
-inline void GetFirstChar(
-  v8::Isolate*& isolate,
-  const v8::Local<v8::String>& str,
-  char*& buf) {
-  str->WriteOneByte(isolate, reinterpret_cast<uint8_t*>(buf), 0, 1, v8::String::WriteOptions::NO_NULL_TERMINATION);
 }
 
 static constexpr nghttp2_nv_flag Http2NoIndexNoCopyNameValue = static_cast<nghttp2_nv_flag>(
@@ -222,8 +244,8 @@ static constexpr nghttp2_nv_flag Http2NoCopyNameValue = static_cast<nghttp2_nv_f
 // 5. less verbose object iteration, helpers for value processing? same code is repeated for non-array values
 // 6. unordered_set - is this what's used? this is give or take JS copy-paste, so maybe not great in c++ ?
 template <typename T>
-NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers, const http_headers_type& header_type) {
-  v8::Local<v8::Array> keys;
+NgHeaders<T>::NgHeaders(Environment*& env, const Local<Object>& headers, const http_headers_type& header_type) {
+  Local<v8::Array> keys;
   auto isolate = env->isolate();
   auto context = env->context();
 
@@ -246,54 +268,56 @@ NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers,
     return;
   }
 
-  valid_ = false;
-
   // sort keys with : in front
   std::unordered_set<size_t> singles{};
   auto neverIndex = GetSensitiveHeaders(isolate, context, headers);
 
-  v8::Local<v8::Value> key_;
-  v8::Local<v8::Value> value_;
-  v8::Local<v8::String> header;
-  v8::Local<v8::String> value;
+  Local<Value> key_;
+  Local<Value> value_;
+  Local<String> header;
+  Local<String> value;
 
-  std::vector<std::pair<v8::Local<v8::String>, std::vector<v8::Local<v8::String>>>> tmp_nv{};
+  std::vector<std::pair<Local<String>, std::vector<Local<String>>>> tmp_nv{};
   size_t storage_required = 0;
   tmp_nv.reserve(keys_length);
 
   // pre-sort headers & results into 2 lists
   // verify basic header information
   for (uint32_t i = 0; i < keys_length; ++i) {
+    // verify that we were able to get the key, and key is a string
     if (!keys->Get(context, i).ToLocal(&key_) || !key_->IsString()) {
       continue;
     }
 
+    // verify that value at this key exists and its not null or undefined
     if (!headers->Get(context, key_).ToLocal(&value_) ||
          value_->IsNullOrUndefined()) {
       continue;
     }
 
-    if (!ToString(isolate, context, key_, &header)) {
+    // extract v8::String into header ptr
+    if (!ToString(context, key_, &header)) {
       continue;
     }
 
+    // value may be an array or another type that can be casted into string
     if (!value_->IsArray()) {
-      if (!ToString(isolate, context, value_, &value)) {
+      if (!ToString(context, value_, &value)) {
         continue;
       }
 
       storage_required += value->Length();
-      tmp_nv.emplace_back(header, std::vector<v8::Local<v8::String>>{value});
+      tmp_nv.emplace_back(header, std::vector<Local<String>>{value});
       ++count_;
     } else {
-      v8::Local<v8::Array> arrValue = value_.As<v8::Array>();
+      Local<v8::Array> arrValue = value_.As<v8::Array>();
       auto l = arrValue->Length();
-      std::vector<v8::Local<v8::String>> val_vec{};
+      std::vector<Local<String>> val_vec{};
       val_vec.reserve(l);
 
       for (uint32_t j = 0; j < l; j++) {
         if (!arrValue->Get(context, j).ToLocal(&value_) ||
-            !ToString(isolate, context, value_, &value)) {
+            !ToString(context, value_, &value)) {
           continue;
         }
 
@@ -335,7 +359,7 @@ NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers,
         reinterpret_cast<uint8_t*>(header_contents),
         0,
         header_len,
-        v8::String::WriteOptions::NO_NULL_TERMINATION);
+        String::WriteOptions::NO_NULL_TERMINATION);
     ada::idna::ascii_map(header_contents, header_len);
 
     auto header_ptr = header_contents;
@@ -394,6 +418,7 @@ NgHeaders<T>::NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers,
     }
   }
 
+  // based on the spec we need to ensure that
   if (n_ps > 0 && n_ps < ng_valid_pseudo_headers_size) {
     std::memmove(nva - n_ps, nva_pseudo, n_ps * sizeof(nv_t));
   }

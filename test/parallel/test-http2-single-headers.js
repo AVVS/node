@@ -25,28 +25,25 @@ const singles = [
 server.on('stream', common.mustNotCall());
 
 server.listen(0, common.mustCall(() => {
-  const client = http2.connect(`http://localhost:${server.address().port}`);
-
   for (const i of singles) {
-    assert.throws(
-      () => client.request({ [i]: 'abc', [i.toUpperCase()]: 'xyz' }),
-      {
+    http2
+      .connect(`http://localhost:${server.address().port}`)
+      .request({ [i]: 'abc', [i.toUpperCase()]: 'xyz' })
+      .on('error', common.expectsError({
         code: 'ERR_HTTP2_HEADER_SINGLE_VALUE',
         name: 'TypeError',
         message: `Header field "${i}" must only have a single value`
-      }
-    );
+      }));
 
-    assert.throws(
-      () => client.request({ [i]: ['abc', 'xyz'] }),
-      {
+    http2
+      .connect(`http://localhost:${server.address().port}`)
+      .request({ [i]: ['abc', 'xyz'] })
+      .on('error', common.expectsError({
         code: 'ERR_HTTP2_HEADER_SINGLE_VALUE',
         name: 'TypeError',
         message: `Header field "${i}" must only have a single value`
-      }
-    );
+      }));
   }
 
-  server.close();
-  client.close();
+  // server.close();
 }));
