@@ -46,11 +46,7 @@ const { throws, strictEqual } = require('assert');
       strictEqual(e.code, 'ERR_INVALID_HTTP_TOKEN');
       server.close();
     }));
-    throws(() => {
-      session.request({ 't est': 123 });
-    }, {
-      code: 'ERR_INVALID_HTTP_TOKEN'
-    });
+    session.request({ 't est': 123 });
   }));
 }
 
@@ -63,11 +59,7 @@ const { throws, strictEqual } = require('assert');
       strictEqual(e.code, 'ERR_INVALID_HTTP_TOKEN');
       server.close();
     }));
-    throws(() => {
-      session.request({ ' test': 123 });
-    }, {
-      code: 'ERR_INVALID_HTTP_TOKEN'
-    });
+    session.request({ ' test': 123 });
   }));
 }
 

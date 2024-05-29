@@ -1149,6 +1149,10 @@ uint32_t TranslateNghttp2ErrorCode(const int libErrorCode) {
   }
 }
 
+// This function is used to dispose of references to queued header blocks
+// that are referenced by nghttp2 name-value structs used in HEADERS blocks
+// we avoid memcpy operations on each char* name/value passed onto nghttp2
+// which should provide performance benefits
 inline void Http2Session::RemoveHeadersReference(const nghttp2_frame_hd& hd) {
   BaseObjectPtr<Http2Stream> stream = this->FindStream(hd.stream_id);
 

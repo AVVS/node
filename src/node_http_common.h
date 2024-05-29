@@ -127,47 +127,49 @@ enum http_known_headers {
   HTTP_KNOWN_HEADER_MAX
 };
 
+// pseudo headers are single valued, listing them here
+// for reference
 static const std::unordered_set<size_t> http2_single_value_headers{
-  std::hash<std::string>{}(":status"),
-  std::hash<std::string>{}(":method"),
-  std::hash<std::string>{}(":authority"),
-  std::hash<std::string>{}(":scheme"),
-  std::hash<std::string>{}(":path"),
-  std::hash<std::string>{}(":protocol"),
-  std::hash<std::string>{}("access-control-allow-credentials"),
-  std::hash<std::string>{}("access-control-max-age"),
-  std::hash<std::string>{}("access-control-request-method"),
-  std::hash<std::string>{}("age"),
-  std::hash<std::string>{}("authorization"),
-  std::hash<std::string>{}("content-encoding"),
-  std::hash<std::string>{}("content-language"),
-  std::hash<std::string>{}("content-length"),
-  std::hash<std::string>{}("content-location"),
-  std::hash<std::string>{}("content-md5"),
-  std::hash<std::string>{}("content-range"),
-  std::hash<std::string>{}("content-type"),
-  std::hash<std::string>{}("date"),
-  std::hash<std::string>{}("dnt"),
-  std::hash<std::string>{}("etag"),
-  std::hash<std::string>{}("expires"),
-  std::hash<std::string>{}("from"),
-  std::hash<std::string>{}("host"),
-  std::hash<std::string>{}("if-match"),
-  std::hash<std::string>{}("if-modified-since"),
-  std::hash<std::string>{}("if-none-match"),
-  std::hash<std::string>{}("if-range"),
-  std::hash<std::string>{}("if-unmodified-since"),
-  std::hash<std::string>{}("last-modified"),
-  std::hash<std::string>{}("location"),
-  std::hash<std::string>{}("max-forwards"),
-  std::hash<std::string>{}("proxy-authorization"),
-  std::hash<std::string>{}("range"),
-  std::hash<std::string>{}("referer"),
-  std::hash<std::string>{}("retry-after"),
-  std::hash<std::string>{}("tk"),
-  std::hash<std::string>{}("upgrade-insecure-requests"),
-  std::hash<std::string>{}("user-agent"),
-  std::hash<std::string>{}("x-content-type-options")
+  // std::hash<std::string>{}(":status"),
+  // std::hash<std::string>{}(":method"),
+  // std::hash<std::string>{}(":authority"),
+  // std::hash<std::string>{}(":scheme"),
+  // std::hash<std::string>{}(":path"),
+  // std::hash<std::string>{}(":protocol"),
+  std::hash<std::string_view>{}("access-control-allow-credentials"),
+  std::hash<std::string_view>{}("access-control-max-age"),
+  std::hash<std::string_view>{}("access-control-request-method"),
+  std::hash<std::string_view>{}("age"),
+  std::hash<std::string_view>{}("authorization"),
+  std::hash<std::string_view>{}("content-encoding"),
+  std::hash<std::string_view>{}("content-language"),
+  std::hash<std::string_view>{}("content-length"),
+  std::hash<std::string_view>{}("content-location"),
+  std::hash<std::string_view>{}("content-md5"),
+  std::hash<std::string_view>{}("content-range"),
+  std::hash<std::string_view>{}("content-type"),
+  std::hash<std::string_view>{}("date"),
+  std::hash<std::string_view>{}("dnt"),
+  std::hash<std::string_view>{}("etag"),
+  std::hash<std::string_view>{}("expires"),
+  std::hash<std::string_view>{}("from"),
+  std::hash<std::string_view>{}("host"),
+  std::hash<std::string_view>{}("if-match"),
+  std::hash<std::string_view>{}("if-modified-since"),
+  std::hash<std::string_view>{}("if-none-match"),
+  std::hash<std::string_view>{}("if-range"),
+  std::hash<std::string_view>{}("if-unmodified-since"),
+  std::hash<std::string_view>{}("last-modified"),
+  std::hash<std::string_view>{}("location"),
+  std::hash<std::string_view>{}("max-forwards"),
+  std::hash<std::string_view>{}("proxy-authorization"),
+  std::hash<std::string_view>{}("range"),
+  std::hash<std::string_view>{}("referer"),
+  std::hash<std::string_view>{}("retry-after"),
+  std::hash<std::string_view>{}("tk"),
+  std::hash<std::string_view>{}("upgrade-insecure-requests"),
+  std::hash<std::string_view>{}("user-agent"),
+  std::hash<std::string_view>{}("x-content-type-options")
 };
 
 enum http_headers_type {
@@ -305,7 +307,7 @@ class NgHeaders {
  public:
   typedef typename T::nv_t nv_t;
   inline NgHeaders(Environment* env, v8::Local<v8::Array> headers);
-  inline NgHeaders(Environment*& env, const v8::Local<v8::Object>& headers, const http_headers_type& response);
+  inline NgHeaders(Environment* env, const v8::Local<v8::Object> headers, const http_headers_type response);
   ~NgHeaders() = default;
 
   const nv_t* operator*() const {
@@ -329,6 +331,15 @@ class NgHeaders {
   size_t count_;
   size_t offset_ = 0;
   MaybeStackBuffer<char, 2048> buf_;
+
+  // helper to write name-value block
+  inline void WriteNVBlock(nv_t* nva,
+                           const size_t n,
+                           char* header_ptr,
+                           const size_t header_len,
+                           char* value_ptr,
+                           const size_t value_len,
+                           uint8_t flags);
 };
 
 // The ng libraries use nearly identical
