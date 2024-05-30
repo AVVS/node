@@ -24,6 +24,8 @@
 
 namespace node {
 
+class ExternalReferenceRegistry;
+
 namespace http2 {
 
 // Constants in all caps are exported as user-facing constants
@@ -453,6 +455,12 @@ class Http2Stream : public AsyncWrap,
   static void Trailers(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Respond(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void RstStream(const v8::FunctionCallbackInfo<v8::Value>& args);
+
+  // fast apis
+  static int32_t FastHttp2Respond(v8::Local<v8::Value> receiver,
+                                  const v8::FastOneByteString& source,
+                                  const uint32_t headers_count,
+                                  const uint32_t options);
 
   class Provider;
 
@@ -1088,6 +1096,8 @@ class Origins {
   V(NGHTTP2_HCAT_HEADERS)                                                      \
   V(NGHTTP2_NV_FLAG_NONE)                                                      \
   V(NGHTTP2_NV_FLAG_NO_INDEX)                                                  \
+  V(NGHTTP2_NV_FLAG_NO_COPY_NAME)                                              \
+  V(NGHTTP2_NV_FLAG_NO_COPY_VALUE)                                             \
   V(NGHTTP2_ERR_DEFERRED)                                                      \
   V(NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE)                                       \
   V(NGHTTP2_ERR_INVALID_ARGUMENT)                                              \

@@ -76,6 +76,40 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Array> headers) {
   }
 }
 
+template <typename T>
+NgHeaders<T>::NgHeaders(const v8::FastOneByteString& headers, const uint32_t count) {
+  count_ = count;
+
+  if (count == 0) {
+    CHECK_EQ(headers.length, 0);
+    return;
+  }
+
+  buf_.AllocateSufficientStorage((alignof(nv_t) - 1) +
+                                 count * sizeof(nv_t) +
+                                 headers.length);
+
+  char* start = AlignUp(buf_.out(), alignof(nv_t));
+  char* header_contents = start + (count * sizeof(nv_t));
+  nv_t* const nva = reinterpret_cast<nv_t*>(start);
+
+  CHECK_LE(header_contents + headers.length, *buf_ + buf_.length());
+  memcpy(header_contents, headers.data, headers.length);
+
+  size_t n = 0;
+  char* p;
+  for (p = header_contents; p < header_contents + headers.length; n++) {
+    nva[n].name = reinterpret_cast<uint8_t*>(p);
+    nva[n].namelen = strlen(p); // TODO: precalculate
+    p += nva[n].namelen + 1;
+    nva[n].value = reinterpret_cast<uint8_t*>(p);
+    nva[n].valuelen = strlen(p); // TODO: precalculate
+    p += nva[n].valuelen + 1;
+    nva[n].flags = *p;
+    p++;
+  }
+}
+
 static const size_t te_hash = std::hash<std::string_view>{}("te");
 static const size_t status_hash = std::hash<std::string_view>{}(":status");
 static const std::unordered_set<size_t> ng_forbidden_headers{

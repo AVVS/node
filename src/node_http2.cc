@@ -2948,28 +2948,57 @@ void Http2Stream::Respond(const FunctionCallbackInfo<Value>& args) {
   Http2Stream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.Holder());
 
-  CHECK_EQ(args.Length(), 2);
-  CHECK(args[0]->IsObject());
+  CHECK_EQ(args.Length(), 3);
+  CHECK(args[0]->IsString());
   CHECK(args[1]->IsNumber());
+  CHECK(args[2]->IsNumber());
 
   HandleScope handle_scope(env->isolate());
-  Local<Object> rawHeaders = args[0].As<Object>();
-  int32_t options = args[1]->Int32Value(env->context()).ToChecked();
 
-  auto headers_ptr = std::make_unique<Http2Headers>(env, rawHeaders, http2_response);
-  if (!headers_ptr->isValid()) {
-    Debug(stream, "headers invalid");
-    return;
-  }
+  Local<String> rawHeaders = args[0].As<v8::String>();
+  uint32_t l = rawHeaders->Length();
+  auto buf = new char[l];
+  rawHeaders->WriteOneByte(env->isolate(),
+                           reinterpret_cast<uint8_t *>(buf),
+                           0,
+                           l,
+                           v8::String::WriteOptions::NO_NULL_TERMINATION);
 
-  // store headers until we receive frame_sent / not_sent
+  uint32_t headers_count = args[1]->Uint32Value(env->context()).ToChecked();
+  int32_t options = args[2]->Int32Value(env->context()).ToChecked();
+  v8::FastOneByteString str{buf, l};
+
+  auto headers_ptr = std::make_unique<Http2Headers>(str, headers_count);
+
+  // // store headers until we receive frame_sent / not_sent
   args.GetReturnValue().Set(
       stream->SubmitResponse(*headers_ptr, static_cast<int>(options)));
   stream->outgoing_headers_.push(std::move(headers_ptr));
 
+  if (buf != nullptr)
+    free(buf);
+
   Debug(stream, "response submitted");
 }
 
+int32_t Http2Stream::FastHttp2Respond(Local<Value> receiver,
+                                      const v8::FastOneByteString& source,
+                                      const uint32_t headers_count,
+                                      const uint32_t options) {
+  Http2Stream* stream = static_cast<Http2Stream*>(BaseObject::FromJSObject(receiver));
+  if (stream == nullptr) {
+    return -1;
+  }
+
+  auto headers_ptr = std::make_unique<Http2Headers>(source, headers_count);
+  auto ret = stream->SubmitResponse(*headers_ptr, static_cast<int>(options));
+  stream->outgoing_headers_.push(std::move(headers_ptr));
+
+  return ret;
+}
+
+static v8::CFunction fast_http2_stream_respond(
+    v8::CFunction::Make(&Http2Stream::FastHttp2Respond));
 
 // Submits informational headers on the Http2Stream
 void Http2Stream::Info(const FunctionCallbackInfo<Value>& args) {
@@ -2999,16 +3028,24 @@ void Http2Stream::Trailers(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.Holder());
 
   HandleScope handle_scope(env->isolate());
-  Local<Object> headers = args[0].As<Object>();
 
-  Debug(stream, "preparing trailers");
+  Local<String> rawHeaders = args[0].As<String>();
+  uint32_t headers_count = args[1]->Uint32Value(env->context()).ToChecked();
 
-  auto trailers_ptr = std::make_unique<Http2Headers>(env, headers, http2_trailer);
-  if (!trailers_ptr->isValid()) {
-    Debug(stream, "trailers invalid, returning");
-    return;
-  }
+  uint32_t l = rawHeaders->Length();
+  auto buf = new char[l];
+  rawHeaders->WriteOneByte(env->isolate(),
+                          reinterpret_cast<uint8_t *>(buf),
+                          0,
+                          l,
+                          v8::String::WriteOptions::NO_NULL_TERMINATION);
+  v8::FastOneByteString str{buf, l};
 
+  auto trailers_ptr = std::make_unique<Http2Headers>(str, headers_count);
+  // if (!trailers_ptr->isValid()) {
+  //   Debug(stream, "trailers invalid, returning");
+  //   return;
+  // }
 
   Debug(stream, "submitting trailers");
   args.GetReturnValue().Set(stream->SubmitTrailers(*trailers_ptr));
@@ -3018,6 +3055,9 @@ void Http2Stream::Trailers(const FunctionCallbackInfo<Value>& args) {
   if (trailers_ptr->length() > 0) {
     stream->outgoing_headers_.push(std::move(trailers_ptr));
   }
+
+  if (buf != nullptr)
+    free(buf);
 }
 
 // Grab the numeric id of the Http2Stream
@@ -3442,7 +3482,14 @@ void Initialize(Local<Object> target,
   SetProtoMethod(isolate, stream, "pushPromise", Http2Stream::PushPromise);
   SetProtoMethod(isolate, stream, "info", Http2Stream::Info);
   SetProtoMethod(isolate, stream, "trailers", Http2Stream::Trailers);
-  SetProtoMethod(isolate, stream, "respond", Http2Stream::Respond);
+
+  // SetProtoMethod(isolate, stream, "respond", Http2Stream::Respond);
+  SetFastMethodNoSideEffect(isolate,
+                            stream,
+                            "respond",
+                            Http2Stream::Respond,
+                            &fast_http2_stream_respond);
+
   SetProtoMethod(isolate, stream, "rstStream", Http2Stream::RstStream);
   SetProtoMethod(isolate, stream, "refreshState", Http2Stream::RefreshState);
   stream->Inherit(AsyncWrap::GetConstructorTemplate(env));
@@ -3549,7 +3596,17 @@ void Initialize(Local<Object> target,
   nghttp2_set_debug_vprintf_callback(NgHttp2Debug);
 #endif
 }
+
+void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
+  registry->Register(Http2Stream::Respond);
+  registry->Register(Http2Stream::FastHttp2Respond);
+  registry->Register(fast_http2_stream_respond.GetTypeInfo());
+}
+
 }  // namespace http2
 }  // namespace node
 
 NODE_BINDING_CONTEXT_AWARE_INTERNAL(http2, node::http2::Initialize)
+
+NODE_BINDING_EXTERNAL_REFERENCE(http2,
+                                node::http2::RegisterExternalReferences)

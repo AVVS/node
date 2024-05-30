@@ -27,6 +27,11 @@ using CFunctionCallbackWithStrings =
     bool (*)(v8::Local<v8::Value>,
              const v8::FastOneByteString& input,
              const v8::FastOneByteString& base);
+using CFunctionCallbackWithOneByteStringAndTwoUInt32 =
+    int32_t (*)(v8::Local<v8::Value>,
+                const v8::FastOneByteString&,
+                const uint32_t,
+                const uint32_t);
 using CFunctionCallbackWithTwoUint8Arrays =
     int32_t (*)(v8::Local<v8::Value>,
                 const v8::FastApiTypedArray<uint8_t>&,
@@ -54,6 +59,7 @@ class ExternalReferenceRegistry {
 #define ALLOWED_EXTERNAL_REFERENCE_TYPES(V)                                    \
   V(CFunctionCallback)                                                         \
   V(CFunctionCallbackWithOneByteString)                                        \
+  V(CFunctionCallbackWithOneByteStringAndTwoUInt32)                            \
   V(CFunctionCallbackReturnDouble)                                             \
   V(CFunctionCallbackValueReturnDouble)                                        \
   V(CFunctionCallbackWithInt64)                                                \
@@ -137,6 +143,7 @@ class ExternalReferenceRegistry {
   V(tty_wrap)                                                                  \
   V(udp_wrap)                                                                  \
   V(url)                                                                       \
+  V(http2)                                                                     \
   V(util)                                                                      \
   V(pipe_wrap)                                                                 \
   V(sea)                                                                       \

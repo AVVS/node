@@ -308,6 +308,7 @@ class NgHeaders {
   typedef typename T::nv_t nv_t;
   inline NgHeaders(Environment* env, v8::Local<v8::Array> headers);
   inline NgHeaders(Environment* env, const v8::Local<v8::Object> headers, const http_headers_type response);
+  inline NgHeaders(const v8::FastOneByteString& headers, const uint32_t count);
   ~NgHeaders() = default;
 
   const nv_t* operator*() const {
