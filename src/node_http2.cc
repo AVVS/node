@@ -11,6 +11,7 @@
 #include "node_perf.h"
 #include "node_revert.h"
 #include "stream_base-inl.h"
+#include "util.h"
 #include "util-inl.h"
 
 #include <algorithm>
@@ -2984,14 +2985,15 @@ void Http2Stream::Respond(const FunctionCallbackInfo<Value>& args) {
 int32_t Http2Stream::FastHttp2Respond(Local<Value> receiver,
                                       const v8::FastOneByteString& source,
                                       const uint32_t headers_count,
-                                      const uint32_t options) {
+                                      const int32_t stream_options) {
+  printf("fast http2 response triggered");
   Http2Stream* stream = static_cast<Http2Stream*>(BaseObject::FromJSObject(receiver));
   if (stream == nullptr) {
     return -1;
   }
 
   auto headers_ptr = std::make_unique<Http2Headers>(source, headers_count);
-  auto ret = stream->SubmitResponse(*headers_ptr, static_cast<int>(options));
+  auto ret = stream->SubmitResponse(*headers_ptr, static_cast<int>(stream_options));
   stream->outgoing_headers_.push(std::move(headers_ptr));
 
   return ret;
@@ -3484,18 +3486,19 @@ void Initialize(Local<Object> target,
   SetProtoMethod(isolate, stream, "trailers", Http2Stream::Trailers);
 
   // SetProtoMethod(isolate, stream, "respond", Http2Stream::Respond);
-  SetFastMethodNoSideEffect(isolate,
-                            stream,
-                            "respond",
-                            Http2Stream::Respond,
-                            &fast_http2_stream_respond);
-
   SetProtoMethod(isolate, stream, "rstStream", Http2Stream::RstStream);
   SetProtoMethod(isolate, stream, "refreshState", Http2Stream::RefreshState);
+
   stream->Inherit(AsyncWrap::GetConstructorTemplate(env));
   StreamBase::AddMethods(env, stream);
   Local<ObjectTemplate> streamt = stream->InstanceTemplate();
   streamt->SetInternalFieldCount(StreamBase::kInternalFieldCount);
+  SetFastMethodNoSideEffect(isolate,
+                            streamt,
+                            "respond",
+                            Http2Stream::Respond,
+                            &fast_http2_stream_respond);
+
   env->set_http2stream_constructor_template(streamt);
   SetConstructorFunction(context, target, "Http2Stream", stream);
 

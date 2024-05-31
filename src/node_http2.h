@@ -24,8 +24,7 @@
 
 namespace node {
 
-class ExternalReferenceRegistry;
-
+class RegisterExternalReferences;
 namespace http2 {
 
 // Constants in all caps are exported as user-facing constants
@@ -460,7 +459,7 @@ class Http2Stream : public AsyncWrap,
   static int32_t FastHttp2Respond(v8::Local<v8::Value> receiver,
                                   const v8::FastOneByteString& source,
                                   const uint32_t headers_count,
-                                  const uint32_t options);
+                                  const int32_t stream_options);
 
   class Provider;
 
