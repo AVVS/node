@@ -118,6 +118,8 @@ class EnvironmentOptions : public Options {
   bool experimental_eventsource = false;
   bool experimental_fetch = true;
   bool experimental_websocket = true;
+  bool experimental_webstorage = false;
+  std::string localstorage_file;
   bool experimental_global_navigator = true;
   bool experimental_global_web_crypto = true;
   bool experimental_https_modules = false;
@@ -130,6 +132,7 @@ class EnvironmentOptions : public Options {
   std::vector<std::string> allow_fs_write;
   bool allow_addons = false;
   bool allow_child_process = false;
+  bool allow_wasi = false;
   bool allow_worker_threads = false;
   bool experimental_repl_await = true;
   bool experimental_vm_modules = false;
@@ -174,6 +177,8 @@ class EnvironmentOptions : public Options {
   bool test_runner_coverage = false;
   bool test_runner_force_exit = false;
   bool test_runner_module_mocks = false;
+  bool test_runner_snapshots = false;
+  bool test_runner_update_snapshots = false;
   std::vector<std::string> test_name_pattern;
   std::vector<std::string> test_reporter;
   std::vector<std::string> test_reporter_destination;

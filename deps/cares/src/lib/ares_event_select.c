@@ -23,8 +23,12 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include "ares_setup.h"
-#include "ares.h"
+
+/* Some systems might default to something low like 256 (NetBSD), lets define
+ * this to assist.  Really, no one should be using select, but lets be safe
+ * anyhow */
+#define FD_SETSIZE 4096
+
 #include "ares_private.h"
 #include "ares_event.h"
 #ifdef HAVE_SYS_SELECT_H
@@ -39,7 +43,7 @@ static ares_bool_t ares_evsys_select_init(ares_event_thread_t *e)
 {
   e->ev_signal = ares_pipeevent_create(e);
   if (e->ev_signal == NULL) {
-    return ARES_FALSE;
+    return ARES_FALSE; /* LCOV_EXCL_LINE: UntestablePath */
   }
   return ARES_TRUE;
 }
@@ -71,7 +75,7 @@ static size_t ares_evsys_select_wait(ares_event_thread_t *e,
                                      unsigned long        timeout_ms)
 {
   size_t          num_fds = 0;
-  ares_socket_t  *fdlist  = ares__htable_asvp_keys(e->ev_handles, &num_fds);
+  ares_socket_t  *fdlist = ares__htable_asvp_keys(e->ev_sock_handles, &num_fds);
   int             rv;
   size_t          cnt = 0;
   size_t          i;
@@ -86,7 +90,7 @@ static size_t ares_evsys_select_wait(ares_event_thread_t *e,
 
   for (i = 0; i < num_fds; i++) {
     const ares_event_t *ev =
-      ares__htable_asvp_get_direct(e->ev_handles, fdlist[i]);
+      ares__htable_asvp_get_direct(e->ev_sock_handles, fdlist[i]);
     if (ev->flags & ARES_EVENT_FLAG_READ) {
       FD_SET(ev->fd, &read_fds);
     }
@@ -110,9 +114,9 @@ static size_t ares_evsys_select_wait(ares_event_thread_t *e,
       ares_event_t      *ev;
       ares_event_flags_t flags = 0;
 
-      ev = ares__htable_asvp_get_direct(e->ev_handles, fdlist[i]);
+      ev = ares__htable_asvp_get_direct(e->ev_sock_handles, fdlist[i]);
       if (ev == NULL || ev->cb == NULL) {
-        continue;
+        continue; /* LCOV_EXCL_LINE: DefensiveCoding */
       }
 
       if (FD_ISSET(fdlist[i], &read_fds)) {

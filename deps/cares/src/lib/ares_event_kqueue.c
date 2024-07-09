@@ -23,8 +23,6 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include "ares_setup.h"
-#include "ares.h"
 #include "ares_private.h"
 #include "ares_event.h"
 
@@ -218,7 +216,7 @@ static size_t ares_evsys_kqueue_wait(ares_event_thread_t *e,
     ares_event_t      *ev;
     ares_event_flags_t flags = 0;
 
-    ev = ares__htable_asvp_get_direct(e->ev_handles,
+    ev = ares__htable_asvp_get_direct(e->ev_sock_handles,
                                       (ares_socket_t)events[i].ident);
     if (ev == NULL || ev->cb == NULL) {
       continue;

@@ -1,49 +1,48 @@
-## c-ares version 1.28.1 - Mar 30 2024
+## c-ares version 1.32.1 - July 7 2024
 
-This release contains a fix for a single significant regression introduced
-in c-ares 1.28.0.
+This is a bugfix release.
 
-* `ares_search()` and `ares_getaddrinfo()` resolution fails if no search domains
-  are specified. [Issue #737](https://github.com/c-ares/c-ares/issues/737)
+Bugfixes:
+* Channel lock needs to be recursive to ensure calls into c-ares functions can
+  be made from callbacks otherwise deadlocks will occur.  This regression was
+  introduced in 1.32.0.
 
 
-## c-ares version 1.28.0 - Mar 29 2024
+## c-ares version 1.32.0 - July 4 2024
 
 This is a feature and bugfix release.
 
 Features:
 
-* Emit warnings when deprecated c-ares functions are used.  This can be
-  disabled by passing a compiler definition of `CARES_NO_DEPRECATED`. [PR #732](https://github.com/c-ares/c-ares/pull/732)
-* Add function `ares_search_dnsrec()` to search for records using the new DNS
-  record data structures. [PR #719](https://github.com/c-ares/c-ares/pull/719)
-* Rework internals to pass around `ares_dns_record_t` instead of binary data,
-  this introduces new public functions of `ares_query_dnsrec()` and
-  `ares_send_dnsrec()`. [PR #730](https://github.com/c-ares/c-ares/pull/730)
+* Add support for DNS 0x20 to help prevent cache poisoning attacks, enabled
+  by specifying `ARES_FLAG_DNS0x20`.  Disabled by default. [PR #800](https://github.com/c-ares/c-ares/pull/800)
+* Rework query timeout logic to automatically adjust timeouts based on network
+  conditions.  The timeout specified now is only used as a hint until there
+  is enough history to calculate a more valid timeout. [PR #794](https://github.com/c-ares/c-ares/pull/794)
 
 Changes:
 
-* tests: when performing simulated queries, reduce timeouts to make tests run
-  faster
-* Replace configuration file parsers with memory-safe parser. [PR #725](https://github.com/c-ares/c-ares/pull/725)
-* Remove `acountry` completely, the manpage might still get installed otherwise. [Issue #718](https://github.com/c-ares/c-ares/pull/718)
+* DNS RR TXT strings should not be automatically concatenated as there are use
+  cases outside of RFC 7208.  In order to maintain ABI compliance, the ability
+  to retrieve TXT strings concatenated is retained as well as a new API to
+  retrieve the individual strings.  This restores behavior from c-ares 1.20.0.
+  [PR #801](https://github.com/c-ares/c-ares/pull/801)
+* Clean up header inclusion logic to make hacking on code easier. [PR #797](https://github.com/c-ares/c-ares/pull/797)
+* GCC/Clang: Enable even more strict warnings to catch more coding flaws. [253bdee](https://github.com/c-ares/c-ares/commit/253bdee)
+* MSVC: Enable `/W4` warning level. [PR #792](https://github.com/c-ares/c-ares/pull/792)
 
 Bugfixes:
 
-* CMake: don't overwrite global required libraries/definitions/includes which
-  could cause build errors for projects chain building c-ares. [Issue #729](https://github.com/c-ares/c-ares/issues/729)
-* On some platforms, `netinet6/in6.h` is not included by `netinet/in.h`
-  and needs to be included separately. [PR #728](https://github.com/c-ares/c-ares/pull/728)
-* Fix a potential memory leak in `ares_init()`. [Issue #724](https://github.com/c-ares/c-ares/issues/724)
-* Some platforms don't have the `isascii()` function.  Implement as a macro. [PR #721](https://github.com/c-ares/c-ares/pull/721)
-* CMake: Fix Chain building if CMAKE runtime paths not set
-* NDots configuration should allow a value of zero. [PR #735](https://github.com/c-ares/c-ares/pull/735)
+* Tests: Fix thread race condition in test cases for EventThread. [PR #803](https://github.com/c-ares/c-ares/pull/803)
+* Windows: Fix building with UNICODE. [PR #802](https://github.com/c-ares/c-ares/pull/802)
+* Thread Saftey: `ares_timeout()` was missing lock. [74a64e4](https://github.com/c-ares/c-ares/commit/74a64e4)
+* Fix building with DJGPP (32bit protected mode DOS). [PR #789](https://github.com/c-ares/c-ares/pull/789)
 
-Thanks go to these friendly people for their efforts and contributions for this release:
+Thanks go to these friendly people for their efforts and contributions for this
+release:
 
 * Brad House (@bradh352)
-* Cristian Rodríguez (@crrodriguez)
-* Daniel Stenberg (@bagder)
-* Faraz (@farazrbx)
-* Faraz Fallahi (@fffaraz)
-* Oliver Welsh (@oliverwelsh)
+* Cheng (@zcbenz)
+
+
+

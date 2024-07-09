@@ -35,13 +35,15 @@
   V(napi_wrapper, "node:napi:wrapper")                                         \
   V(untransferable_object_private_symbol, "node:untransferableObject")         \
   V(exit_info_private_symbol, "node:exit_info_private_symbol")                 \
-  V(promise_trace_id, "node:promise_trace_id")
+  V(promise_trace_id, "node:promise_trace_id")                                 \
+  V(source_map_data_private_symbol, "node:source_map_data_private_symbol")
 
 // Symbols are per-isolate primitives but Environment proxies them
 // for the sake of convenience.
 #define PER_ISOLATE_SYMBOL_PROPERTIES(V)                                       \
   V(fs_use_promises_symbol, "fs_use_promises_symbol")                          \
   V(async_id_symbol, "async_id_symbol")                                        \
+  V(constructor_key_symbol, "constructor_key_symbol")                          \
   V(handle_onclose_symbol, "handle_onclose")                                   \
   V(no_message_symbol, "no_message_symbol")                                    \
   V(messaging_deserialize_symbol, "messaging_deserialize_symbol")              \

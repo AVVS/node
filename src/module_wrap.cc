@@ -125,7 +125,7 @@ v8::Maybe<bool> ModuleWrap::CheckUnsettledTopLevelAwait() {
 
   auto stalled_messages =
       std::get<1>(module->GetStalledTopLevelAwaitMessages(isolate));
-  if (stalled_messages.size() == 0) {
+  if (stalled_messages.empty()) {
     return v8::Just(true);
   }
 
@@ -308,6 +308,14 @@ void ModuleWrap::New(const FunctionCallbackInfo<Value>& args) {
 
   if (synthetic && args[4]->IsObject() &&
       that->Set(context, realm->isolate_data()->imported_cjs_symbol(), args[4])
+          .IsNothing()) {
+    return;
+  }
+
+  // Initialize an empty slot for source map cache before the object is frozen.
+  if (that->SetPrivate(context,
+                       realm->isolate_data()->source_map_data_private_symbol(),
+                       Undefined(isolate))
           .IsNothing()) {
     return;
   }

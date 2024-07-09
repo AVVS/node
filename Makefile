@@ -147,7 +147,7 @@ ifdef JOBS
 	NINJA_ARGS := $(NINJA_ARGS) -j$(JOBS)
 else
 	IMMEDIATE_NINJA_ARGS := $(NINJA_ARGS)
-	NINJA_ARGS = $(IMMEDIATE_NINJA_ARGS) $(filter -j%,$(MAKEFLAGS))
+	NINJA_ARGS = $(filter -j%,$(MAKEFLAGS))$(IMMEDIATE_NINJA_ARGS)
 endif
 $(NODE_EXE): config.gypi out/Release/build.ninja
 	$(NINJA) -C out/Release $(NINJA_ARGS)
@@ -174,7 +174,7 @@ with-code-cache test-code-cache:
 
 out/Makefile: config.gypi common.gypi node.gyp \
 	deps/uv/uv.gyp deps/llhttp/llhttp.gyp deps/zlib/zlib.gyp \
-	deps/simdutf/simdutf.gyp deps/ada/ada.gyp \
+	deps/simdutf/simdutf.gyp deps/ada/ada.gyp deps/nbytes/nbytes.gyp \
 	tools/v8_gypfiles/toolchain.gypi tools/v8_gypfiles/features.gypi \
 	tools/v8_gypfiles/inspector.gypi tools/v8_gypfiles/v8.gyp
 	$(PYTHON) tools/gyp_node.py -f make
@@ -553,6 +553,7 @@ test-ci-native: | benchmark/napi/.buildstamp test/addons/.buildstamp test/js-nat
 test-ci-js: | clear-stalled
 	$(PYTHON) tools/test.py $(PARALLEL_ARGS) -p tap --logfile test.tap \
 		--mode=$(BUILDTYPE_LOWER) --flaky-tests=$(FLAKY_TESTS) \
+		--skip-tests=$(CI_SKIP_TESTS) \
 		$(TEST_CI_ARGS) $(CI_JS_SUITES)
 	$(info Clean up any leftover processes, error if found.)
 	ps awwx | grep Release/node | grep -v grep | cat
@@ -1150,13 +1151,14 @@ pkg: $(PKG)
 .PHONY: corepack-update
 corepack-update:
 	mkdir -p /tmp/node-corepack
-	curl -qLo /tmp/node-corepack/package.tgz "$$(npm view corepack dist.tarball)"
+	curl -qLo /tmp/node-corepack/package.tgz "$$($(call available-node,$(NPM) view corepack dist.tarball))"
 
 	rm -rf deps/corepack && mkdir deps/corepack
 	cd deps/corepack && tar xf /tmp/node-corepack/package.tgz --strip-components=1
 	chmod +x deps/corepack/shims/*
 
-	node deps/corepack/dist/corepack.js --version
+	$(call available-node,'-p' \
+			 'require(`./deps/corepack/package.json`).version')
 
 .PHONY: pkg-upload
 # Note: this is strictly for release builds on release machines only.
@@ -1187,9 +1189,10 @@ $(TARBALL): release-only doc-only
 	$(RM) -r $(TARNAME)/doc/images # too big
 	$(RM) -r $(TARNAME)/test*.tap
 	$(RM) -r $(TARNAME)/tools/cpplint.py
+	$(RM) -r $(TARNAME)/tools/eslint
 	$(RM) -r $(TARNAME)/tools/eslint-rules
 	$(RM) -r $(TARNAME)/tools/license-builder.sh
-	$(RM) -r $(TARNAME)/tools/node_modules
+	$(RM) -r $(TARNAME)/tools/eslint/node_modules
 	$(RM) -r $(TARNAME)/tools/osx-*
 	$(RM) -r $(TARNAME)/tools/osx-pkg.pmdoc
 	find $(TARNAME)/deps/v8/test/* -type d ! -regex '.*/test/torque$$' | xargs $(RM) -r
@@ -1375,7 +1378,7 @@ format-md:
 
 LINT_JS_TARGETS = eslint.config.mjs benchmark doc lib test tools
 
-run-lint-js = tools/node_modules/eslint/bin/eslint.js --cache \
+run-lint-js = tools/eslint/node_modules/eslint/bin/eslint.js --cache \
 	--max-warnings=0 --report-unused-disable-directives $(LINT_JS_TARGETS)
 run-lint-js-fix = $(run-lint-js) --fix
 
@@ -1399,7 +1402,7 @@ lint-js lint-js-doc:
 jslint: lint-js
 	$(warning Please use lint-js instead of jslint)
 
-run-lint-js-ci = tools/node_modules/eslint/bin/eslint.js \
+run-lint-js-ci = tools/eslint/node_modules/eslint/bin/eslint.js \
   --max-warnings=0 --report-unused-disable-directives -f tap \
 	-o test-eslint.tap $(LINT_JS_TARGETS)
 
@@ -1524,8 +1527,8 @@ cpplint: lint-cpp
 # Try with '--system' if it fails without; the system may have set '--user'
 lint-py-build:
 	$(info Pip installing ruff on $(shell $(PYTHON) --version)...)
-	$(PYTHON) -m pip install --upgrade --target tools/pip/site-packages ruff==0.3.4 || \
-		$(PYTHON) -m pip install --upgrade --system --target tools/pip/site-packages ruff==0.3.4
+	$(PYTHON) -m pip install --upgrade --target tools/pip/site-packages ruff==0.4.5 || \
+		$(PYTHON) -m pip install --upgrade --system --target tools/pip/site-packages ruff==0.4.5
 
 .PHONY: lint-py
 ifneq ("","$(wildcard tools/pip/site-packages/ruff)")
@@ -1559,7 +1562,7 @@ lint-yaml:
 
 .PHONY: lint
 .PHONY: lint-ci
-ifneq ("","$(wildcard tools/node_modules/eslint/)")
+ifneq ("","$(wildcard tools/eslint/node_modules/eslint/)")
 lint: ## Run JS, C++, MD and doc linters.
 	@EXIT_STATUS=0 ; \
 	$(MAKE) lint-js || EXIT_STATUS=$$? ; \
