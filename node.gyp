@@ -234,6 +234,7 @@
       'src/node_http_common.h',
       'src/node_http_common-inl.h',
       'src/node_http2.h',
+      'src/node_http2-inl.h',
       'src/node_http2_state.h',
       'src/node_i18n.h',
       'src/node_internals.h',

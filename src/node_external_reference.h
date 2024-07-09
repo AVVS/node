@@ -12,6 +12,20 @@ namespace node {
 
 using CFunctionCallbackWithOneByteString =
     uint32_t (*)(v8::Local<v8::Value>, const v8::FastOneByteString&);
+using CFunctionCallbackWithTwoOneByteStringsAndUInt8 =
+  void (*)(v8::Local<v8::Value>,
+           const v8::FastOneByteString&,
+           const v8::FastOneByteString&,
+           const uint32_t);
+using CFunctionCallbackWithEmbedderAndInt32ReturnInt32 =
+  int32_t (*)(v8::Local<v8::Value>,
+              v8::Local<v8::Value>,
+              const int32_t);
+
+using CFunctionCallbackWithEmbedderReturnInt32 =
+  int32_t (*)(v8::Local<v8::Value>,
+              v8::Local<v8::Value>);
+
 using CFunctionCallback = void (*)(v8::Local<v8::Value> receiver);
 using CFunctionCallbackReturnDouble =
     double (*)(v8::Local<v8::Object> receiver);
@@ -59,7 +73,10 @@ class ExternalReferenceRegistry {
 #define ALLOWED_EXTERNAL_REFERENCE_TYPES(V)                                    \
   V(CFunctionCallback)                                                         \
   V(CFunctionCallbackWithOneByteString)                                        \
-  V(CFunctionCallbackWithOneByteStringUInt32Int32)                            \
+  V(CFunctionCallbackWithOneByteStringUInt32Int32)                             \
+  V(CFunctionCallbackWithTwoOneByteStringsAndUInt8)                            \
+  V(CFunctionCallbackWithEmbedderAndInt32ReturnInt32)                          \
+  V(CFunctionCallbackWithEmbedderReturnInt32)                                  \
   V(CFunctionCallbackReturnDouble)                                             \
   V(CFunctionCallbackValueReturnDouble)                                        \
   V(CFunctionCallbackWithInt64)                                                \
