@@ -9,6 +9,7 @@
 #include "node_errors.h"
 #include "v8.h"
 #include "nghttp2/nghttp2.h"
+#include "nbytes.h"
 
 namespace node {
 
@@ -113,7 +114,7 @@ void Http2JSHeadersImpl::Prepare() {
   buf_.AllocateSufficientStorage((alignof(nv_t) - 1) +
                                  count_ * sizeof(nv_t));
 
-  char* start = AlignUp(buf_.out(), alignof(nv_t));
+  char* start = nbytes::AlignUp(buf_.out(), alignof(nv_t));
   nv_t* const nva = reinterpret_cast<nv_t*>(start);
 
   char* p;
