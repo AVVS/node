@@ -14,6 +14,7 @@
 #include "node_http_common.h"
 #include "node_mem.h"
 #include "node_perf.h"
+#include "base_object.h"
 #include "stream_base.h"
 #include "string_bytes.h"
 #include "v8-fast-api-calls.h"
@@ -24,6 +25,7 @@
 
 namespace node {
 
+class RegisterExternalReferences;
 namespace http2 {
 
 // Constants in all caps are exported as user-facing constants
@@ -99,6 +101,12 @@ enum SessionType {
   NGHTTP2_SESSION_SERVER,
   NGHTTP2_SESSION_CLIENT
 };
+
+static constexpr nghttp2_nv_flag Http2NoIndexNoCopyNameValue = static_cast<nghttp2_nv_flag>(
+  NGHTTP2_NV_FLAG_NO_INDEX | NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE);
+
+static constexpr nghttp2_nv_flag Http2NoCopyNameValue = static_cast<nghttp2_nv_flag>(
+  NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE);
 
 template <typename T, void(*fn)(T*)>
 struct Nghttp2Deleter {
@@ -270,6 +278,106 @@ struct Http2HeaderTraits {
 
 using Http2Header = NgHeader<Http2HeaderTraits>;
 
+// Http2JSHeaders
+
+
+// Http2JSHeader for fast calls
+class Http2JSHeadersImpl {
+ public:
+  typedef nghttp2_nv nv_t;
+
+  enum InternalFields {
+    kSlot = BaseObject::kSlot,
+    kImplField = BaseObject::kInternalFieldCount,
+    kInternalFieldCount
+  };
+
+  // explicit Http2JSHeadersImpl() = default;
+  ~Http2JSHeadersImpl() = default;
+
+  static void AddMethods(v8::Isolate* isolate,
+                         v8::Local<v8::FunctionTemplate> tmpl);
+
+  static void RegisterExternalReferences(ExternalReferenceRegistry* registry);
+
+  static Http2JSHeadersImpl* FromJSObject(v8::Local<v8::Value> value);
+
+  // initially called by js world
+  void AddHeaderImpl(const std::string_view& name,
+                     const std::string_view& value,
+                     const uint8_t flags);
+
+  // should be called before accessing buf_
+  void Prepare();
+
+  // support NgHeaders interface
+  const nv_t* operator*() const {
+    return reinterpret_cast<const nv_t*>(*buf_);
+  }
+
+  const nv_t* data() const {
+    return reinterpret_cast<const nv_t*>(*buf_);
+  }
+
+  // amount of headers to be sent out
+  size_t length() const {
+    return count_;
+  }
+
+ private:
+  void add_pseudo(const std::string_view& name,
+                  const std::string_view& value,
+                  const uint8_t flags);
+
+  void add_regular(const std::string_view& name,
+                   const std::string_view& value,
+                   const uint8_t flags);
+
+  size_t count_;
+  size_t pseudo_count_;
+  size_t real_count_;
+  size_t pseudo_nv_pairs_[HTTP2_VALID_PSEUDO_HEADERS * 2]; // space for 6 header pairs
+  MaybeStackBuffer<size_t, 32> regular_nv_pairs_;
+  MaybeStackBuffer<char, 512> pseudo_headers_;
+  MaybeStackBuffer<char, 2048> real_headers_;
+  MaybeStackBuffer<char, 1024> buf_;
+};
+
+// Defines visible interface in javascript world
+class Http2JSHeadersBase final : public BaseObject, public Http2JSHeadersImpl {
+ public:
+  static v8::Local<v8::FunctionTemplate> GetConstructorTemplate(
+      IsolateData* isolate_data);
+  static void Initialize(IsolateData* isolate_data,
+                         v8::Local<v8::ObjectTemplate> target);
+  static void RegisterExternalReferences(ExternalReferenceRegistry* registry);
+
+  static BaseObjectPtr<Http2JSHeadersBase> Create(Environment* env);
+
+  static void New(const v8::FunctionCallbackInfo<v8::Value>& args);
+
+  SET_NO_MEMORY_INFO()
+  SET_MEMORY_INFO_NAME(Http2JSHeadersBase)
+  SET_SELF_SIZE(Http2JSHeadersBase)
+
+  static void AddHeader(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void FastAddHeader(
+      v8::Local<v8::Value> receiver,
+      const v8::FastOneByteString& name,
+      const v8::FastOneByteString& value,
+      const uint32_t flags);
+
+  Http2JSHeadersBase(
+      Environment* env,
+      v8::Local<v8::Object> wrap);
+
+ private:
+  static v8::CFunction fast_add_header_;
+  BaseObjectWeakPtr<Http2Stream> stream_;
+};
+
+// End Http2JsHeaders
+
 class Http2Stream : public AsyncWrap,
                     public StreamBase {
  public:
@@ -300,13 +408,13 @@ class Http2Stream : public AsyncWrap,
   bool HasWantsWrite() const override { return true; }
 
   // Initiate a response on this stream.
-  int SubmitResponse(const Http2Headers& headers, int options);
+  int SubmitResponse(const Http2JSHeadersImpl* headers, int options);
 
   // Submit informational headers for this stream
-  int SubmitInfo(const Http2Headers& headers);
+  int SubmitInfo(const Http2JSHeadersImpl* headers);
 
   // Submit trailing headers for this stream
-  int SubmitTrailers(const Http2Headers& headers);
+  int SubmitTrailers(const Http2JSHeadersImpl* headers);
   void OnTrailers();
 
   // Submit a PRIORITY frame for this stream
@@ -319,7 +427,7 @@ class Http2Stream : public AsyncWrap,
 
   // Submits a PUSH_PROMISE frame with this stream as the parent.
   Http2Stream* SubmitPushPromise(
-      const Http2Headers& headers,
+      const Http2JSHeadersImpl& headers,
       int32_t* ret,
       int options = 0);
 
@@ -443,6 +551,11 @@ class Http2Stream : public AsyncWrap,
 
   std::string diagnostic_name() const override;
 
+  // Init API
+  static void RegisterExternalReferences(ExternalReferenceRegistry *registry);
+  static void AddMethods(v8::Isolate* isolate,
+                         v8::Local<v8::ObjectTemplate> tmpl);
+
   // JavaScript API
   static void GetID(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Destroy(const v8::FunctionCallbackInfo<v8::Value>& args);
@@ -453,6 +566,13 @@ class Http2Stream : public AsyncWrap,
   static void Trailers(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Respond(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void RstStream(const v8::FunctionCallbackInfo<v8::Value>& args);
+
+  // Fast JavaScript API
+  static int32_t FastRespond(v8::Local<v8::Value> receiver,
+                             v8::Local<v8::Value> h,
+                             int32_t options);
+  static int32_t FastTrailers(v8::Local<v8::Value> receiver,
+                              v8::Local<v8::Value> h);
 
   class Provider;
 
@@ -504,10 +624,14 @@ class Http2Stream : public AsyncWrap,
   std::queue<NgHttp2StreamWrite> queue_;
   size_t available_outbound_length_ = 0;
 
-  // Outbound Headers
-  std::queue<std::unique_ptr<Http2Headers>> outgoing_headers_;
+  // Outbound Headers reference storage
+  std::queue<Http2JSHeadersBase*> outgoing_headers_;
 
   Http2StreamListener stream_listener_;
+
+  // fast api references
+  static v8::CFunction fast_respond_;
+  static v8::CFunction fast_trailers_;
 
   friend class Http2Session;
 };
@@ -611,7 +735,7 @@ class Http2Session : public AsyncWrap,
   // This only works if the session is a client session.
   Http2Stream* SubmitRequest(
       const Http2Priority& priority,
-      const Http2Headers& headers,
+      const Http2JSHeadersImpl* headers,
       int32_t* ret,
       int options = 0);
 
@@ -1081,6 +1205,14 @@ class Origins {
   std::unique_ptr<v8::BackingStore> bs_;
 };
 
+static void Initialize(v8::Local<v8::Object> target,
+                v8::Local<v8::Value> unused,
+                v8::Local<v8::Context> context,
+                void* priv);
+
+static void CreatePerIsolateProperties(IsolateData* isolate_data,
+                                       v8::Local<v8::ObjectTemplate> target);
+
 #define HTTP2_HIDDEN_CONSTANTS(V)                                              \
   V(NGHTTP2_HCAT_REQUEST)                                                      \
   V(NGHTTP2_HCAT_RESPONSE)                                                     \
@@ -1088,6 +1220,8 @@ class Origins {
   V(NGHTTP2_HCAT_HEADERS)                                                      \
   V(NGHTTP2_NV_FLAG_NONE)                                                      \
   V(NGHTTP2_NV_FLAG_NO_INDEX)                                                  \
+  V(NGHTTP2_NV_FLAG_NO_COPY_NAME)                                              \
+  V(NGHTTP2_NV_FLAG_NO_COPY_VALUE)                                             \
   V(NGHTTP2_ERR_DEFERRED)                                                      \
   V(NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE)                                       \
   V(NGHTTP2_ERR_INVALID_ARGUMENT)                                              \

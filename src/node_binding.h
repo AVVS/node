@@ -53,6 +53,7 @@ static_assert(static_cast<int>(NM_F_LINKED) ==
   V(timers)                                                                    \
   V(url)                                                                       \
   V(worker)                                                                    \
+  V(http2)                                                                     \
   NODE_BUILTIN_ICU_BINDINGS(V)                                                 \
   NODE_BUILTIN_QUIC_BINDINGS(V)
 

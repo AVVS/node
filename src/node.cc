@@ -205,7 +205,17 @@ void Environment::InitializeInspector(
     return;
   }
 
+  if (should_wait_for_inspector_frontend()) {
+    WaitForInspectorFrontendByOptions();
+  }
+
   profiler::StartProfilers(this);
+}
+
+void Environment::WaitForInspectorFrontendByOptions() {
+  if (!inspector_agent_->WaitForConnectByOptions()) {
+    return;
+  }
 
   if (inspector_agent_->options().break_node_first_line) {
     inspector_agent_->PauseOnNextJavascriptStatement("Break at bootstrap");
@@ -254,6 +264,14 @@ std::optional<StartExecutionCallbackInfo> CallbackInfoFromArray(
   CHECK(process_obj->IsObject());
   CHECK(require_fn->IsFunction());
   CHECK(runcjs_fn->IsFunction());
+  // TODO(joyeecheung): some support for running ESM as an entrypoint
+  // is needed. The simplest API would be to add a run_esm to
+  // StartExecutionCallbackInfo which compiles, links (to builtins)
+  // and evaluates a SourceTextModule.
+  // TODO(joyeecheung): the env pointer should be part of
+  // StartExecutionCallbackInfo, otherwise embedders are forced to use
+  // lambdas to pass it into the callback, which can make the code
+  // difficult to read.
   node::StartExecutionCallbackInfo info{process_obj.As<Object>(),
                                         require_fn.As<Function>(),
                                         runcjs_fn.As<Function>()};
@@ -1288,18 +1306,24 @@ ExitCode GenerateAndWriteSnapshotData(const SnapshotData** snapshot_data_ptr,
       return exit_code;
     }
   } else {
+    std::optional<std::string> builder_script_content;
     // Otherwise, load and run the specified builder script.
     std::unique_ptr<SnapshotData> generated_data =
         std::make_unique<SnapshotData>();
-    std::string builder_script_content;
-    int r = ReadFileSync(&builder_script_content, builder_script.c_str());
-    if (r != 0) {
-      FPrintF(stderr,
-              "Cannot read builder script %s for building snapshot. %s: %s",
-              builder_script,
-              uv_err_name(r),
-              uv_strerror(r));
-      return ExitCode::kGenericUserError;
+    if (builder_script != "node:generate_default_snapshot") {
+      builder_script_content = std::string();
+      int r = ReadFileSync(&(builder_script_content.value()),
+                           builder_script.c_str());
+      if (r != 0) {
+        FPrintF(stderr,
+                "Cannot read builder script %s for building snapshot. %s: %s\n",
+                builder_script,
+                uv_err_name(r),
+                uv_strerror(r));
+        return ExitCode::kGenericUserError;
+      }
+    } else {
+      snapshot_config.builder_script_path = std::nullopt;
     }
 
     exit_code = node::SnapshotBuilder::Generate(generated_data.get(),
