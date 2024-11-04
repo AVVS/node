@@ -7,7 +7,7 @@ if ((!common.hasCrypto) || (!common.hasIntl)) {
 
 common.skipIfEslintMissing();
 
-const { RuleTester } = require('../../tools/node_modules/eslint');
+const { RuleTester } = require('../../tools/eslint/node_modules/eslint');
 const rule = require('../../tools/eslint-rules/no-duplicate-requires');
 
 new RuleTester({
@@ -17,7 +17,7 @@ new RuleTester({
 }).run('no-duplicate-requires', rule, {
   valid: [
     {
-      code: 'require("a"); require("b"); (function() { require("a"); });',
+      code: '(function() { require("a"); }); (function() { require("a"); });',
     },
     {
       code: 'require(a); require(a);',

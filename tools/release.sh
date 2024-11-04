@@ -17,9 +17,7 @@ promotecmd=dist-promote
 signcmd=dist-sign
 customsshkey="" # let ssh and scp use default key
 signversion=""
-cloudflare_bucket="dist-prod"
-cloudflare_endpoint=https://07be8d2fbc940503ca1be344714cb0d1.r2.cloudflarestorage.com # Node.js Cloudflare account
-cloudflare_profile="worker"
+cloudflare_bucket="r2:dist-prod"
 
 while getopts ":i:s:" option; do
     case "${option}" in
@@ -138,7 +136,7 @@ sign() {
   echo ""
 
   while true; do
-    printf "Upload files to %s? [y/n] " "$webhost"
+    printf "Upload files to %s and Cloudflare R2? [y/n] " "$webhost"
     yorn=""
     read -r yorn
 
@@ -147,37 +145,26 @@ sign() {
     fi
 
     if [ "X${yorn}" = "Xy" ]; then
+      # Copy SHASUMS256.txt and its signatures to the web host:
       # shellcheck disable=SC2086
       scp ${customsshkey} "${tmpdir}/${shafile}" "${tmpdir}/${shafile}.asc" "${tmpdir}/${shafile}.sig" "${webuser}@${webhost}:${shadir}/"
       # shellcheck disable=SC2086,SC2029
       ssh ${customsshkey} "${webuser}@${webhost}" chmod 644 "${shadir}/${shafile}.asc" "${shadir}/${shafile}.sig"
-      break
-    fi
-  done
 
-  while true; do
-    printf "Upload files from %s to R2 staging bucket? [y/n]" "$webhost"
-    yorn=""
-    read -r yorn
-
-    if [ "X${yorn}" = "Xn" ]; then
-      break
-    fi
-
-    if [ "X${yorn}" = "Xy" ]; then
-      # Note: the binaries and SHASUMS256.txt should already be in this bucket since the DO will upload them
+      # Copy the signatures to Cloudflare R2:
+      # Note: the binaries and SHASUMS256.txt should already be in the bucket
+      # since the promotion script should take care of uploading them.
 
       # Remove /home/dist/ part
-      r2dir=$(echo "$shadir" | cut -c 11-)
+      r2dir=$(echo "$shadir" | cut -c 12-)
 
-      # Copy SHASUM256.txt.asc
+      # Copy SHASUMS256.txt.asc
       # shellcheck disable=SC2086,SC2029
-      ssh ${customsshkey} "$webuser@$webhost" aws s3 cp "${shadir}/${shafile}.asc" "s3://${cloudflare_bucket}/${r2dir}/${shafile}.asc" --endpoint="${cloudflare_endpoint}" --profile=${cloudflare_profile}
+      ssh ${customsshkey} "${webuser}@${webhost}" rclone copyto "${shadir}/${shafile}.asc" "${cloudflare_bucket}/${r2dir}/${shafile}.asc"
 
-      # Copy SHASUM256.txt.sig
+      # Copy SHASUMS256.txt.sig
       # shellcheck disable=SC2086,SC2029
-      ssh ${customsshkey} "$webuser@$webhost" aws s3 cp "${shadir}/${shafile}.sig" "s3://${cloudflare_bucket}/${r2dir}/${shafile}.sig" --endpoint="${cloudflare_endpoint}" --profile=${cloudflare_profile}
-
+      ssh ${customsshkey} "${webuser}@${webhost}" rclone copyto "${shadir}/${shafile}.sig" "${cloudflare_bucket}/${r2dir}/${shafile}.sig"
       break
     fi
   done

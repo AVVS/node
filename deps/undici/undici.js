@@ -247,6 +247,20 @@ var require_errors = __commonJS({
         this.headers = headers;
       }
     };
+    var ResponseError = class extends UndiciError {
+      static {
+        __name(this, "ResponseError");
+      }
+      constructor(message, code, { headers, data }) {
+        super(message);
+        this.name = "ResponseError";
+        this.message = message || "Response error";
+        this.code = "UND_ERR_RESPONSE";
+        this.statusCode = code;
+        this.data = data;
+        this.headers = headers;
+      }
+    };
     var SecureProxyConnectionError = class extends UndiciError {
       static {
         __name(this, "SecureProxyConnectionError");
@@ -281,6 +295,7 @@ var require_errors = __commonJS({
       BalancedPoolMissingUpstreamError,
       ResponseExceededMaxSizeError,
       RequestRetryError,
+      ResponseError,
       SecureProxyConnectionError
     };
   }
@@ -311,6 +326,7 @@ var require_symbols = __commonJS({
       kHost: Symbol("host"),
       kNoRef: Symbol("no ref"),
       kBodyUsed: Symbol("used"),
+      kBody: Symbol("abstracted request body"),
       kRunning: Symbol("running"),
       kBlocking: Symbol("blocking"),
       kPending: Symbol("pending"),
@@ -777,9 +793,9 @@ var require_pool_base = __commonJS({
       }
       async [kClose]() {
         if (this[kQueue].isEmpty()) {
-          return Promise.all(this[kClients].map((c) => c.close()));
+          await Promise.all(this[kClients].map((c) => c.close()));
         } else {
-          return new Promise((resolve) => {
+          await new Promise((resolve) => {
             this[kClosedResolve] = resolve;
           });
         }
@@ -792,7 +808,7 @@ var require_pool_base = __commonJS({
           }
           item.handler.onError(err);
         }
-        return Promise.all(this[kClients].map((c) => c.destroy(err)));
+        await Promise.all(this[kClients].map((c) => c.destroy(err)));
       }
       [kDispatch](opts, handler) {
         const dispatcher = this[kGetDispatcher]();
@@ -1105,17 +1121,55 @@ var require_util = __commonJS({
   "lib/core/util.js"(exports2, module2) {
     "use strict";
     var assert = require("node:assert");
-    var { kDestroyed, kBodyUsed, kListeners } = require_symbols();
+    var { kDestroyed, kBodyUsed, kListeners, kBody } = require_symbols();
     var { IncomingMessage } = require("node:http");
     var stream = require("node:stream");
     var net = require("node:net");
-    var { InvalidArgumentError } = require_errors();
     var { Blob: Blob2 } = require("node:buffer");
     var nodeUtil = require("node:util");
     var { stringify } = require("node:querystring");
+    var { EventEmitter: EE } = require("node:events");
+    var { InvalidArgumentError } = require_errors();
     var { headerNameLowerCasedRecord } = require_constants();
     var { tree } = require_tree();
     var [nodeMajor, nodeMinor] = process.versions.node.split(".").map((v) => Number(v));
+    var BodyAsyncIterable = class {
+      static {
+        __name(this, "BodyAsyncIterable");
+      }
+      constructor(body) {
+        this[kBody] = body;
+        this[kBodyUsed] = false;
+      }
+      async *[Symbol.asyncIterator]() {
+        assert(!this[kBodyUsed], "disturbed");
+        this[kBodyUsed] = true;
+        yield* this[kBody];
+      }
+    };
+    function wrapRequestBody(body) {
+      if (isStream(body)) {
+        if (bodyLength(body) === 0) {
+          body.on("data", function() {
+            assert(false);
+          });
+        }
+        if (typeof body.readableDidRead !== "boolean") {
+          body[kBodyUsed] = false;
+          EE.prototype.on.call(body, "data", function() {
+            this[kBodyUsed] = true;
+          });
+        }
+        return body;
+      } else if (body && typeof body.pipeTo === "function") {
+        return new BodyAsyncIterable(body);
+      } else if (body && typeof body !== "string" && !ArrayBuffer.isView(body) && isIterable(body)) {
+        return new BodyAsyncIterable(body);
+      } else {
+        return body;
+      }
+    }
+    __name(wrapRequestBody, "wrapRequestBody");
     function nop() {
     }
     __name(nop, "nop");
@@ -1227,7 +1281,7 @@ var require_util = __commonJS({
       if (!host) {
         return null;
       }
-      assert.strictEqual(typeof host, "string");
+      assert(typeof host === "string");
       const servername = getHostname(host);
       if (net.isIP(servername)) {
         return "";
@@ -1543,6 +1597,27 @@ var require_util = __commonJS({
     __name(errorRequest, "errorRequest");
     var kEnumerableProperty = /* @__PURE__ */ Object.create(null);
     kEnumerableProperty.enumerable = true;
+    var normalizedMethodRecordsBase = {
+      delete: "DELETE",
+      DELETE: "DELETE",
+      get: "GET",
+      GET: "GET",
+      head: "HEAD",
+      HEAD: "HEAD",
+      options: "OPTIONS",
+      OPTIONS: "OPTIONS",
+      post: "POST",
+      POST: "POST",
+      put: "PUT",
+      PUT: "PUT"
+    };
+    var normalizedMethodRecords = {
+      ...normalizedMethodRecordsBase,
+      patch: "patch",
+      PATCH: "PATCH"
+    };
+    Object.setPrototypeOf(normalizedMethodRecordsBase, null);
+    Object.setPrototypeOf(normalizedMethodRecords, null);
     module2.exports = {
       kEnumerableProperty,
       nop,
@@ -1581,11 +1656,14 @@ var require_util = __commonJS({
       isValidHeaderValue,
       isTokenCharCode,
       parseRangeHeader,
+      normalizedMethodRecordsBase,
+      normalizedMethodRecords,
       isValidPort,
       isHttpOrHttpsPrefixed,
       nodeMajor,
       nodeMinor,
-      safeHTTPMethods: ["GET", "HEAD", "OPTIONS", "TRACE"]
+      safeHTTPMethods: ["GET", "HEAD", "OPTIONS", "TRACE"],
+      wrapRequestBody
     };
   }
 });
@@ -1795,7 +1873,8 @@ var require_request = __commonJS({
       isBlobLike,
       buildURL,
       validateHandler,
-      getServerName
+      getServerName,
+      normalizedMethodRecords
     } = require_util();
     var { channels } = require_diagnostics();
     var { headerNameLowerCasedRecord } = require_constants();
@@ -1825,12 +1904,12 @@ var require_request = __commonJS({
           throw new InvalidArgumentError("path must be a string");
         } else if (path[0] !== "/" && !(path.startsWith("http://") || path.startsWith("https://")) && method !== "CONNECT") {
           throw new InvalidArgumentError("path must be an absolute URL or start with a slash");
-        } else if (invalidPathRegex.exec(path) !== null) {
+        } else if (invalidPathRegex.test(path)) {
           throw new InvalidArgumentError("invalid request path");
         }
         if (typeof method !== "string") {
           throw new InvalidArgumentError("method must be a string");
-        } else if (!isValidHTTPToken(method)) {
+        } else if (normalizedMethodRecords[method] === void 0 && !isValidHTTPToken(method)) {
           throw new InvalidArgumentError("invalid request method");
         }
         if (upgrade && typeof upgrade !== "string") {
@@ -2102,6 +2181,242 @@ var require_request = __commonJS({
   }
 });
 
+// lib/util/timers.js
+var require_timers = __commonJS({
+  "lib/util/timers.js"(exports2, module2) {
+    "use strict";
+    var fastNow = 0;
+    var RESOLUTION_MS = 1e3;
+    var TICK_MS = (RESOLUTION_MS >> 1) - 1;
+    var fastNowTimeout;
+    var kFastTimer = Symbol("kFastTimer");
+    var fastTimers = [];
+    var NOT_IN_LIST = -2;
+    var TO_BE_CLEARED = -1;
+    var PENDING = 0;
+    var ACTIVE = 1;
+    function onTick() {
+      fastNow += TICK_MS;
+      let idx = 0;
+      let len = fastTimers.length;
+      while (idx < len) {
+        const timer = fastTimers[idx];
+        if (timer._state === PENDING) {
+          timer._idleStart = fastNow - TICK_MS;
+          timer._state = ACTIVE;
+        } else if (timer._state === ACTIVE && fastNow >= timer._idleStart + timer._idleTimeout) {
+          timer._state = TO_BE_CLEARED;
+          timer._idleStart = -1;
+          timer._onTimeout(timer._timerArg);
+        }
+        if (timer._state === TO_BE_CLEARED) {
+          timer._state = NOT_IN_LIST;
+          if (--len !== 0) {
+            fastTimers[idx] = fastTimers[len];
+          }
+        } else {
+          ++idx;
+        }
+      }
+      fastTimers.length = len;
+      if (fastTimers.length !== 0) {
+        refreshTimeout();
+      }
+    }
+    __name(onTick, "onTick");
+    function refreshTimeout() {
+      if (fastNowTimeout) {
+        fastNowTimeout.refresh();
+      } else {
+        clearTimeout(fastNowTimeout);
+        fastNowTimeout = setTimeout(onTick, TICK_MS);
+        if (fastNowTimeout.unref) {
+          fastNowTimeout.unref();
+        }
+      }
+    }
+    __name(refreshTimeout, "refreshTimeout");
+    var FastTimer = class {
+      static {
+        __name(this, "FastTimer");
+      }
+      [kFastTimer] = true;
+      /**
+       * The state of the timer, which can be one of the following:
+       * - NOT_IN_LIST (-2)
+       * - TO_BE_CLEARED (-1)
+       * - PENDING (0)
+       * - ACTIVE (1)
+       *
+       * @type {-2|-1|0|1}
+       * @private
+       */
+      _state = NOT_IN_LIST;
+      /**
+       * The number of milliseconds to wait before calling the callback.
+       *
+       * @type {number}
+       * @private
+       */
+      _idleTimeout = -1;
+      /**
+       * The time in milliseconds when the timer was started. This value is used to
+       * calculate when the timer should expire.
+       *
+       * @type {number}
+       * @default -1
+       * @private
+       */
+      _idleStart = -1;
+      /**
+       * The function to be executed when the timer expires.
+       * @type {Function}
+       * @private
+       */
+      _onTimeout;
+      /**
+       * The argument to be passed to the callback when the timer expires.
+       *
+       * @type {*}
+       * @private
+       */
+      _timerArg;
+      /**
+       * @constructor
+       * @param {Function} callback A function to be executed after the timer
+       * expires.
+       * @param {number} delay The time, in milliseconds that the timer should wait
+       * before the specified function or code is executed.
+       * @param {*} arg
+       */
+      constructor(callback, delay, arg) {
+        this._onTimeout = callback;
+        this._idleTimeout = delay;
+        this._timerArg = arg;
+        this.refresh();
+      }
+      /**
+       * Sets the timer's start time to the current time, and reschedules the timer
+       * to call its callback at the previously specified duration adjusted to the
+       * current time.
+       * Using this on a timer that has already called its callback will reactivate
+       * the timer.
+       *
+       * @returns {void}
+       */
+      refresh() {
+        if (this._state === NOT_IN_LIST) {
+          fastTimers.push(this);
+        }
+        if (!fastNowTimeout || fastTimers.length === 1) {
+          refreshTimeout();
+        }
+        this._state = PENDING;
+      }
+      /**
+       * The `clear` method cancels the timer, preventing it from executing.
+       *
+       * @returns {void}
+       * @private
+       */
+      clear() {
+        this._state = TO_BE_CLEARED;
+        this._idleStart = -1;
+      }
+    };
+    module2.exports = {
+      /**
+       * The setTimeout() method sets a timer which executes a function once the
+       * timer expires.
+       * @param {Function} callback A function to be executed after the timer
+       * expires.
+       * @param {number} delay The time, in milliseconds that the timer should
+       * wait before the specified function or code is executed.
+       * @param {*} [arg] An optional argument to be passed to the callback function
+       * when the timer expires.
+       * @returns {NodeJS.Timeout|FastTimer}
+       */
+      setTimeout(callback, delay, arg) {
+        return delay <= RESOLUTION_MS ? setTimeout(callback, delay, arg) : new FastTimer(callback, delay, arg);
+      },
+      /**
+       * The clearTimeout method cancels an instantiated Timer previously created
+       * by calling setTimeout.
+       *
+       * @param {NodeJS.Timeout|FastTimer} timeout
+       */
+      clearTimeout(timeout) {
+        if (timeout[kFastTimer]) {
+          timeout.clear();
+        } else {
+          clearTimeout(timeout);
+        }
+      },
+      /**
+       * The setFastTimeout() method sets a fastTimer which executes a function once
+       * the timer expires.
+       * @param {Function} callback A function to be executed after the timer
+       * expires.
+       * @param {number} delay The time, in milliseconds that the timer should
+       * wait before the specified function or code is executed.
+       * @param {*} [arg] An optional argument to be passed to the callback function
+       * when the timer expires.
+       * @returns {FastTimer}
+       */
+      setFastTimeout(callback, delay, arg) {
+        return new FastTimer(callback, delay, arg);
+      },
+      /**
+       * The clearTimeout method cancels an instantiated FastTimer previously
+       * created by calling setFastTimeout.
+       *
+       * @param {FastTimer} timeout
+       */
+      clearFastTimeout(timeout) {
+        timeout.clear();
+      },
+      /**
+       * The now method returns the value of the internal fast timer clock.
+       *
+       * @returns {number}
+       */
+      now() {
+        return fastNow;
+      },
+      /**
+       * Trigger the onTick function to process the fastTimers array.
+       * Exported for testing purposes only.
+       * Marking as deprecated to discourage any use outside of testing.
+       * @deprecated
+       * @param {number} [delay=0] The delay in milliseconds to add to the now value.
+       */
+      tick(delay = 0) {
+        fastNow += delay - RESOLUTION_MS + 1;
+        onTick();
+        onTick();
+      },
+      /**
+       * Reset FastTimers.
+       * Exported for testing purposes only.
+       * Marking as deprecated to discourage any use outside of testing.
+       * @deprecated
+       */
+      reset() {
+        fastNow = 0;
+        fastTimers.length = 0;
+        clearTimeout(fastNowTimeout);
+        fastNowTimeout = null;
+      },
+      /**
+       * Exporting for testing purposes only.
+       * Marking as deprecated to discourage any use outside of testing.
+       * @deprecated
+       */
+      kFastTimer
+    };
+  }
+});
+
 // lib/core/connect.js
 var require_connect = __commonJS({
   "lib/core/connect.js"(exports2, module2) {
@@ -2110,6 +2425,10 @@ var require_connect = __commonJS({
     var assert = require("node:assert");
     var util = require_util();
     var { InvalidArgumentError, ConnectTimeoutError } = require_errors();
+    var timers = require_timers();
+    function noop() {
+    }
+    __name(noop, "noop");
     var tls;
     var SessionCache;
     if (global.FinalizationRegistry && !(process.env.NODE_V8_COVERAGE || process.env.UNDICI_NO_FG)) {
@@ -2166,7 +2485,7 @@ var require_connect = __commonJS({
         }
       };
     }
-    function buildConnector({ allowH2, maxCachedSessions, socketPath, timeout, ...opts }) {
+    function buildConnector({ allowH2, maxCachedSessions, socketPath, timeout, session: customSession, ...opts }) {
       if (maxCachedSessions != null && (!Number.isInteger(maxCachedSessions) || maxCachedSessions < 0)) {
         throw new InvalidArgumentError("maxCachedSessions must be a positive integer or zero");
       }
@@ -2182,8 +2501,9 @@ var require_connect = __commonJS({
           }
           servername = servername || options.servername || util.getServerName(host) || null;
           const sessionKey = servername || hostname;
-          const session = sessionCache.get(sessionKey) || null;
           assert(sessionKey);
+          const session = customSession || sessionCache.get(sessionKey) || null;
+          port = port || 443;
           socket = tls.connect({
             highWaterMark: 16384,
             // TLS in node can't have bigger HWM anyway...
@@ -2195,7 +2515,7 @@ var require_connect = __commonJS({
             ALPNProtocols: allowH2 ? ["http/1.1", "h2"] : ["http/1.1"],
             socket: httpSocket,
             // upgrade socket connection
-            port: port || 443,
+            port,
             host: hostname
           });
           socket.on("session", function(session2) {
@@ -2203,12 +2523,13 @@ var require_connect = __commonJS({
           });
         } else {
           assert(!httpSocket, "httpSocket can only be sent on TLS update");
+          port = port || 80;
           socket = net.connect({
             highWaterMark: 64 * 1024,
             // Same as nodejs fs streams.
             ...options,
             localAddress,
-            port: port || 80,
+            port,
             host: hostname
           });
         }
@@ -2216,16 +2537,16 @@ var require_connect = __commonJS({
           const keepAliveInitialDelay = options.keepAliveInitialDelay === void 0 ? 6e4 : options.keepAliveInitialDelay;
           socket.setKeepAlive(true, keepAliveInitialDelay);
         }
-        const cancelTimeout = setupTimeout(() => onConnectTimeout(socket), timeout);
+        const clearConnectTimeout = setupConnectTimeout(new WeakRef(socket), { timeout, hostname, port });
         socket.setNoDelay(true).once(protocol === "https:" ? "secureConnect" : "connect", function() {
-          cancelTimeout();
+          queueMicrotask(clearConnectTimeout);
           if (callback) {
             const cb = callback;
             callback = null;
             cb(null, this);
           }
         }).on("error", function(err) {
-          cancelTimeout();
+          queueMicrotask(clearConnectTimeout);
           if (callback) {
             const cb = callback;
             callback = null;
@@ -2236,126 +2557,49 @@ var require_connect = __commonJS({
       }, "connect");
     }
     __name(buildConnector, "buildConnector");
-    function setupTimeout(onConnectTimeout2, timeout) {
-      if (!timeout) {
-        return () => {
-        };
+    var setupConnectTimeout = process.platform === "win32" ? (socketWeakRef, opts) => {
+      if (!opts.timeout) {
+        return noop;
       }
       let s1 = null;
       let s2 = null;
-      const timeoutId = setTimeout(() => {
+      const fastTimer = timers.setFastTimeout(() => {
         s1 = setImmediate(() => {
-          if (process.platform === "win32") {
-            s2 = setImmediate(() => onConnectTimeout2());
-          } else {
-            onConnectTimeout2();
-          }
+          s2 = setImmediate(() => onConnectTimeout(socketWeakRef.deref(), opts));
         });
-      }, timeout);
+      }, opts.timeout);
       return () => {
-        clearTimeout(timeoutId);
+        timers.clearFastTimeout(fastTimer);
         clearImmediate(s1);
         clearImmediate(s2);
       };
-    }
-    __name(setupTimeout, "setupTimeout");
-    function onConnectTimeout(socket) {
+    } : (socketWeakRef, opts) => {
+      if (!opts.timeout) {
+        return noop;
+      }
+      let s1 = null;
+      const fastTimer = timers.setFastTimeout(() => {
+        s1 = setImmediate(() => {
+          onConnectTimeout(socketWeakRef.deref(), opts);
+        });
+      }, opts.timeout);
+      return () => {
+        timers.clearFastTimeout(fastTimer);
+        clearImmediate(s1);
+      };
+    };
+    function onConnectTimeout(socket, opts) {
       let message = "Connect Timeout Error";
       if (Array.isArray(socket.autoSelectFamilyAttemptedAddresses)) {
-        message += ` (attempted addresses: ${socket.autoSelectFamilyAttemptedAddresses.join(", ")})`;
+        message += ` (attempted addresses: ${socket.autoSelectFamilyAttemptedAddresses.join(", ")},`;
+      } else {
+        message += ` (attempted address: ${opts.hostname}:${opts.port},`;
       }
+      message += ` timeout: ${opts.timeout}ms)`;
       util.destroy(socket, new ConnectTimeoutError(message));
     }
     __name(onConnectTimeout, "onConnectTimeout");
     module2.exports = buildConnector;
-  }
-});
-
-// lib/util/timers.js
-var require_timers = __commonJS({
-  "lib/util/timers.js"(exports2, module2) {
-    "use strict";
-    var TICK_MS = 499;
-    var fastNow = Date.now();
-    var fastNowTimeout;
-    var fastTimers = [];
-    function onTimeout() {
-      fastNow = Date.now();
-      let len = fastTimers.length;
-      let idx = 0;
-      while (idx < len) {
-        const timer = fastTimers[idx];
-        if (timer.state === 0) {
-          timer.state = fastNow + timer.delay - TICK_MS;
-        } else if (timer.state > 0 && fastNow >= timer.state) {
-          timer.state = -1;
-          timer.callback(timer.opaque);
-        }
-        if (timer.state === -1) {
-          timer.state = -2;
-          if (idx !== len - 1) {
-            fastTimers[idx] = fastTimers.pop();
-          } else {
-            fastTimers.pop();
-          }
-          len -= 1;
-        } else {
-          idx += 1;
-        }
-      }
-      if (fastTimers.length > 0) {
-        refreshTimeout();
-      }
-    }
-    __name(onTimeout, "onTimeout");
-    function refreshTimeout() {
-      if (fastNowTimeout?.refresh) {
-        fastNowTimeout.refresh();
-      } else {
-        clearTimeout(fastNowTimeout);
-        fastNowTimeout = setTimeout(onTimeout, TICK_MS);
-        if (fastNowTimeout.unref) {
-          fastNowTimeout.unref();
-        }
-      }
-    }
-    __name(refreshTimeout, "refreshTimeout");
-    var Timeout = class {
-      static {
-        __name(this, "Timeout");
-      }
-      constructor(callback, delay, opaque) {
-        this.callback = callback;
-        this.delay = delay;
-        this.opaque = opaque;
-        this.state = -2;
-        this.refresh();
-      }
-      refresh() {
-        if (this.state === -2) {
-          fastTimers.push(this);
-          if (!fastNowTimeout || fastTimers.length === 1) {
-            refreshTimeout();
-          }
-        }
-        this.state = 0;
-      }
-      clear() {
-        this.state = -1;
-      }
-    };
-    module2.exports = {
-      setTimeout(callback, delay, opaque) {
-        return delay <= 1e3 ? setTimeout(callback, delay, opaque) : new Timeout(callback, delay, opaque);
-      },
-      clearTimeout(timeout) {
-        if (timeout instanceof Timeout) {
-          timeout.clear();
-        } else {
-          clearTimeout(timeout);
-        }
-      }
-    };
   }
 });
 
@@ -2723,151 +2967,193 @@ var require_llhttp_simd_wasm = __commonJS({
 var require_constants3 = __commonJS({
   "lib/web/fetch/constants.js"(exports2, module2) {
     "use strict";
-    var corsSafeListedMethods = ["GET", "HEAD", "POST"];
+    var corsSafeListedMethods = (
+      /** @type {const} */
+      ["GET", "HEAD", "POST"]
+    );
     var corsSafeListedMethodsSet = new Set(corsSafeListedMethods);
-    var nullBodyStatus = [101, 204, 205, 304];
-    var redirectStatus = [301, 302, 303, 307, 308];
+    var nullBodyStatus = (
+      /** @type {const} */
+      [101, 204, 205, 304]
+    );
+    var redirectStatus = (
+      /** @type {const} */
+      [301, 302, 303, 307, 308]
+    );
     var redirectStatusSet = new Set(redirectStatus);
-    var badPorts = [
-      "1",
-      "7",
-      "9",
-      "11",
-      "13",
-      "15",
-      "17",
-      "19",
-      "20",
-      "21",
-      "22",
-      "23",
-      "25",
-      "37",
-      "42",
-      "43",
-      "53",
-      "69",
-      "77",
-      "79",
-      "87",
-      "95",
-      "101",
-      "102",
-      "103",
-      "104",
-      "109",
-      "110",
-      "111",
-      "113",
-      "115",
-      "117",
-      "119",
-      "123",
-      "135",
-      "137",
-      "139",
-      "143",
-      "161",
-      "179",
-      "389",
-      "427",
-      "465",
-      "512",
-      "513",
-      "514",
-      "515",
-      "526",
-      "530",
-      "531",
-      "532",
-      "540",
-      "548",
-      "554",
-      "556",
-      "563",
-      "587",
-      "601",
-      "636",
-      "989",
-      "990",
-      "993",
-      "995",
-      "1719",
-      "1720",
-      "1723",
-      "2049",
-      "3659",
-      "4045",
-      "4190",
-      "5060",
-      "5061",
-      "6000",
-      "6566",
-      "6665",
-      "6666",
-      "6667",
-      "6668",
-      "6669",
-      "6679",
-      "6697",
-      "10080"
-    ];
+    var badPorts = (
+      /** @type {const} */
+      [
+        "1",
+        "7",
+        "9",
+        "11",
+        "13",
+        "15",
+        "17",
+        "19",
+        "20",
+        "21",
+        "22",
+        "23",
+        "25",
+        "37",
+        "42",
+        "43",
+        "53",
+        "69",
+        "77",
+        "79",
+        "87",
+        "95",
+        "101",
+        "102",
+        "103",
+        "104",
+        "109",
+        "110",
+        "111",
+        "113",
+        "115",
+        "117",
+        "119",
+        "123",
+        "135",
+        "137",
+        "139",
+        "143",
+        "161",
+        "179",
+        "389",
+        "427",
+        "465",
+        "512",
+        "513",
+        "514",
+        "515",
+        "526",
+        "530",
+        "531",
+        "532",
+        "540",
+        "548",
+        "554",
+        "556",
+        "563",
+        "587",
+        "601",
+        "636",
+        "989",
+        "990",
+        "993",
+        "995",
+        "1719",
+        "1720",
+        "1723",
+        "2049",
+        "3659",
+        "4045",
+        "4190",
+        "5060",
+        "5061",
+        "6000",
+        "6566",
+        "6665",
+        "6666",
+        "6667",
+        "6668",
+        "6669",
+        "6679",
+        "6697",
+        "10080"
+      ]
+    );
     var badPortsSet = new Set(badPorts);
-    var referrerPolicy = [
-      "",
-      "no-referrer",
-      "no-referrer-when-downgrade",
-      "same-origin",
-      "origin",
-      "strict-origin",
-      "origin-when-cross-origin",
-      "strict-origin-when-cross-origin",
-      "unsafe-url"
-    ];
+    var referrerPolicy = (
+      /** @type {const} */
+      [
+        "",
+        "no-referrer",
+        "no-referrer-when-downgrade",
+        "same-origin",
+        "origin",
+        "strict-origin",
+        "origin-when-cross-origin",
+        "strict-origin-when-cross-origin",
+        "unsafe-url"
+      ]
+    );
     var referrerPolicySet = new Set(referrerPolicy);
-    var requestRedirect = ["follow", "manual", "error"];
-    var safeMethods = ["GET", "HEAD", "OPTIONS", "TRACE"];
+    var requestRedirect = (
+      /** @type {const} */
+      ["follow", "manual", "error"]
+    );
+    var safeMethods = (
+      /** @type {const} */
+      ["GET", "HEAD", "OPTIONS", "TRACE"]
+    );
     var safeMethodsSet = new Set(safeMethods);
-    var requestMode = ["navigate", "same-origin", "no-cors", "cors"];
-    var requestCredentials = ["omit", "same-origin", "include"];
-    var requestCache = [
-      "default",
-      "no-store",
-      "reload",
-      "no-cache",
-      "force-cache",
-      "only-if-cached"
-    ];
-    var requestBodyHeader = [
-      "content-encoding",
-      "content-language",
-      "content-location",
-      "content-type",
-      // See https://github.com/nodejs/undici/issues/2021
-      // 'Content-Length' is a forbidden header name, which is typically
-      // removed in the Headers implementation. However, undici doesn't
-      // filter out headers, so we add it here.
-      "content-length"
-    ];
-    var requestDuplex = [
-      "half"
-    ];
-    var forbiddenMethods = ["CONNECT", "TRACE", "TRACK"];
+    var requestMode = (
+      /** @type {const} */
+      ["navigate", "same-origin", "no-cors", "cors"]
+    );
+    var requestCredentials = (
+      /** @type {const} */
+      ["omit", "same-origin", "include"]
+    );
+    var requestCache = (
+      /** @type {const} */
+      [
+        "default",
+        "no-store",
+        "reload",
+        "no-cache",
+        "force-cache",
+        "only-if-cached"
+      ]
+    );
+    var requestBodyHeader = (
+      /** @type {const} */
+      [
+        "content-encoding",
+        "content-language",
+        "content-location",
+        "content-type",
+        // See https://github.com/nodejs/undici/issues/2021
+        // 'Content-Length' is a forbidden header name, which is typically
+        // removed in the Headers implementation. However, undici doesn't
+        // filter out headers, so we add it here.
+        "content-length"
+      ]
+    );
+    var requestDuplex = (
+      /** @type {const} */
+      [
+        "half"
+      ]
+    );
+    var forbiddenMethods = (
+      /** @type {const} */
+      ["CONNECT", "TRACE", "TRACK"]
+    );
     var forbiddenMethodsSet = new Set(forbiddenMethods);
-    var subresource = [
-      "audio",
-      "audioworklet",
-      "font",
-      "image",
-      "manifest",
-      "paintworklet",
-      "script",
-      "style",
-      "track",
-      "video",
-      "xslt",
-      ""
-    ];
+    var subresource = (
+      /** @type {const} */
+      [
+        "audio",
+        "audioworklet",
+        "font",
+        "image",
+        "manifest",
+        "paintworklet",
+        "script",
+        "style",
+        "track",
+        "video",
+        "xslt",
+        ""
+      ]
+    );
     var subresourceSet = new Set(subresource);
     module2.exports = {
       subresource,
@@ -3732,7 +4018,7 @@ var require_util2 = __commonJS({
     var { getGlobalOrigin } = require_global();
     var { collectASequenceOfCodePoints, collectAnHTTPQuotedString, removeChars, parseMIMEType } = require_data_url();
     var { performance: performance2 } = require("node:perf_hooks");
-    var { isBlobLike, ReadableStreamFrom, isValidHTTPToken } = require_util();
+    var { isBlobLike, ReadableStreamFrom, isValidHTTPToken, normalizedMethodRecordsBase } = require_util();
     var assert = require("node:assert");
     var { isUint8Array } = require("node:util/types");
     var { webidl } = require_webidl();
@@ -3853,7 +4139,7 @@ var require_util2 = __commonJS({
     __name(appendFetchMetadata, "appendFetchMetadata");
     function appendRequestOriginHeader(request) {
       let serializedOrigin = request.origin;
-      if (serializedOrigin === "client") {
+      if (serializedOrigin === "client" || serializedOrigin === void 0) {
         return;
       }
       if (request.responseTainting === "cors" || request.mode === "websocket") {
@@ -4158,29 +4444,8 @@ var require_util2 = __commonJS({
       return fetchParams.controller.state === "aborted" || fetchParams.controller.state === "terminated";
     }
     __name(isCancelled, "isCancelled");
-    var normalizeMethodRecordBase = {
-      delete: "DELETE",
-      DELETE: "DELETE",
-      get: "GET",
-      GET: "GET",
-      head: "HEAD",
-      HEAD: "HEAD",
-      options: "OPTIONS",
-      OPTIONS: "OPTIONS",
-      post: "POST",
-      POST: "POST",
-      put: "PUT",
-      PUT: "PUT"
-    };
-    var normalizeMethodRecord = {
-      ...normalizeMethodRecordBase,
-      patch: "patch",
-      PATCH: "PATCH"
-    };
-    Object.setPrototypeOf(normalizeMethodRecordBase, null);
-    Object.setPrototypeOf(normalizeMethodRecord, null);
     function normalizeMethod(method) {
-      return normalizeMethodRecordBase[method.toLowerCase()] ?? method;
+      return normalizedMethodRecordsBase[method.toLowerCase()] ?? method;
     }
     __name(normalizeMethod, "normalizeMethod");
     function serializeJavascriptValueToJSONString(value) {
@@ -4324,7 +4589,7 @@ var require_util2 = __commonJS({
       });
     }
     __name(iteratorMixin, "iteratorMixin");
-    async function fullyReadBody(body, processBody, processBodyError, shouldClone) {
+    async function fullyReadBody(body, processBody, processBodyError) {
       const successSteps = processBody;
       const errorSteps = processBodyError;
       let reader;
@@ -4335,7 +4600,7 @@ var require_util2 = __commonJS({
         return;
       }
       try {
-        successSteps(await readAllBytes(reader, shouldClone));
+        successSteps(await readAllBytes(reader));
       } catch (e) {
         errorSteps(e);
       }
@@ -4362,19 +4627,12 @@ var require_util2 = __commonJS({
       return input;
     }
     __name(isomorphicEncode, "isomorphicEncode");
-    async function readAllBytes(reader, shouldClone) {
+    async function readAllBytes(reader) {
       const bytes = [];
       let byteLength = 0;
       while (true) {
         const { done, value: chunk } = await reader.read();
         if (done) {
-          if (bytes.length === 1) {
-            const { buffer, byteOffset, byteLength: byteLength2 } = bytes[0];
-            if (shouldClone === false) {
-              return Buffer.from(buffer, byteOffset, byteLength2);
-            }
-            return Buffer.from(buffer.slice(byteOffset, byteOffset + byteLength2), 0, byteLength2);
-          }
           return Buffer.concat(bytes, byteLength);
         }
         if (!isUint8Array(chunk)) {
@@ -4487,13 +4745,19 @@ var require_util2 = __commonJS({
       static {
         __name(this, "InflateStream");
       }
+      #zlibOptions;
+      /** @param {zlib.ZlibOptions} [zlibOptions] */
+      constructor(zlibOptions) {
+        super();
+        this.#zlibOptions = zlibOptions;
+      }
       _transform(chunk, encoding, callback) {
         if (!this._inflateStream) {
           if (chunk.length === 0) {
             callback();
             return;
           }
-          this._inflateStream = (chunk[0] & 15) === 8 ? zlib.createInflate() : zlib.createInflateRaw();
+          this._inflateStream = (chunk[0] & 15) === 8 ? zlib.createInflate(this.#zlibOptions) : zlib.createInflateRaw(this.#zlibOptions);
           this._inflateStream.on("data", this.push.bind(this));
           this._inflateStream.on("end", () => this.push(null));
           this._inflateStream.on("error", (err) => this.destroy(err));
@@ -4508,8 +4772,8 @@ var require_util2 = __commonJS({
         callback();
       }
     };
-    function createInflate() {
-      return new InflateStream();
+    function createInflate(zlibOptions) {
+      return new InflateStream(zlibOptions);
     }
     __name(createInflate, "createInflate");
     function extractMimeType(headers) {
@@ -4657,7 +4921,6 @@ var require_util2 = __commonJS({
       urlHasHttpsScheme,
       urlIsHttpHttpsScheme,
       readAllBytes,
-      normalizeMethodRecord,
       simpleRangeHeaderValue,
       buildContentRange,
       parseMetadata,
@@ -4949,8 +5212,15 @@ var require_formdata_parser = __commonJS({
       const boundary = Buffer.from(`--${boundaryString}`, "utf8");
       const entryList = [];
       const position = { position: 0 };
-      if (input[0] === 13 && input[1] === 10) {
+      while (input[position.position] === 13 && input[position.position + 1] === 10) {
         position.position += 2;
+      }
+      let trailing = input.length;
+      while (input[trailing - 1] === 10 && input[trailing - 2] === 13) {
+        trailing -= 2;
+      }
+      if (trailing !== input.length) {
+        input = input.subarray(0, trailing);
       }
       while (true) {
         if (input.subarray(position.position, position.position + boundary.length).equals(boundary)) {
@@ -5175,11 +5445,24 @@ var require_body = __commonJS({
     var { webidl } = require_webidl();
     var { Blob: Blob2 } = require("node:buffer");
     var assert = require("node:assert");
-    var { isErrored } = require_util();
+    var { isErrored, isDisturbed } = require("node:stream");
     var { isArrayBuffer } = require("node:util/types");
     var { serializeAMimeType } = require_data_url();
     var { multipartFormDataParser } = require_formdata_parser();
     var textEncoder = new TextEncoder();
+    function noop() {
+    }
+    __name(noop, "noop");
+    var hasFinalizationRegistry = globalThis.FinalizationRegistry && process.version.indexOf("v18") !== 0;
+    var streamRegistry;
+    if (hasFinalizationRegistry) {
+      streamRegistry = new FinalizationRegistry((weakRef) => {
+        const stream = weakRef.deref();
+        if (stream && !stream.locked && !isDisturbed(stream) && !isErrored(stream)) {
+          stream.cancel("Response object has been garbage collected").catch(noop);
+        }
+      });
+    }
     function extractBody(object, keepalive = false) {
       let stream = null;
       if (object instanceof ReadableStream) {
@@ -5324,8 +5607,11 @@ Content-Type: ${value.type || "application/octet-stream"}\r
       return extractBody(object, keepalive);
     }
     __name(safelyExtractBody, "safelyExtractBody");
-    function cloneBody(body) {
+    function cloneBody(instance, body) {
       const [out1, out2] = body.stream.tee();
+      if (hasFinalizationRegistry) {
+        streamRegistry.register(instance, new WeakRef(out1));
+      }
       body.stream = out1;
       return {
         stream: out2,
@@ -5351,18 +5637,18 @@ Content-Type: ${value.type || "application/octet-stream"}\r
               mimeType = serializeAMimeType(mimeType);
             }
             return new Blob2([bytes], { type: mimeType });
-          }, instance, false);
+          }, instance);
         },
         arrayBuffer() {
           return consumeBody(this, (bytes) => {
-            return bytes.buffer;
-          }, instance, true);
+            return new Uint8Array(bytes).buffer;
+          }, instance);
         },
         text() {
-          return consumeBody(this, utf8DecodeBytes, instance, false);
+          return consumeBody(this, utf8DecodeBytes, instance);
         },
         json() {
-          return consumeBody(this, parseJSONFromBytes, instance, false);
+          return consumeBody(this, parseJSONFromBytes, instance);
         },
         formData() {
           return consumeBody(this, (value) => {
@@ -5391,12 +5677,12 @@ Content-Type: ${value.type || "application/octet-stream"}\r
             throw new TypeError(
               'Content-Type was not one of "multipart/form-data" or "application/x-www-form-urlencoded".'
             );
-          }, instance, false);
+          }, instance);
         },
         bytes() {
           return consumeBody(this, (bytes) => {
-            return new Uint8Array(bytes.buffer, 0, bytes.byteLength);
-          }, instance, true);
+            return new Uint8Array(bytes);
+          }, instance);
         }
       };
       return methods;
@@ -5406,9 +5692,9 @@ Content-Type: ${value.type || "application/octet-stream"}\r
       Object.assign(prototype.prototype, bodyMixinMethods(prototype));
     }
     __name(mixinBody, "mixinBody");
-    async function consumeBody(object, convertBytesToJSValue, instance, shouldClone) {
+    async function consumeBody(object, convertBytesToJSValue, instance) {
       webidl.brandCheck(object, instance);
-      if (bodyUnusable(object[kState].body)) {
+      if (bodyUnusable(object)) {
         throw new TypeError("Body is unusable: Body has already been read");
       }
       throwIfAborted(object[kState]);
@@ -5425,11 +5711,12 @@ Content-Type: ${value.type || "application/octet-stream"}\r
         successSteps(Buffer.allocUnsafe(0));
         return promise.promise;
       }
-      await fullyReadBody(object[kState].body, successSteps, errorSteps, shouldClone);
+      await fullyReadBody(object[kState].body, successSteps, errorSteps);
       return promise.promise;
     }
     __name(consumeBody, "consumeBody");
-    function bodyUnusable(body) {
+    function bodyUnusable(object) {
+      const body = object[kState].body;
       return body != null && (body.stream.locked || util.isDisturbed(body.stream));
     }
     __name(bodyUnusable, "bodyUnusable");
@@ -5450,7 +5737,10 @@ Content-Type: ${value.type || "application/octet-stream"}\r
       extractBody,
       safelyExtractBody,
       cloneBody,
-      mixinBody
+      mixinBody,
+      streamRegistry,
+      hasFinalizationRegistry,
+      bodyUnusable
     };
   }
 });
@@ -5529,35 +5819,35 @@ var require_client_h1 = __commonJS({
             return 0;
           },
           wasm_on_status: (p, at, len) => {
-            assert.strictEqual(currentParser.ptr, p);
+            assert(currentParser.ptr === p);
             const start = at - currentBufferPtr + currentBufferRef.byteOffset;
             return currentParser.onStatus(new FastBuffer(currentBufferRef.buffer, start, len)) || 0;
           },
           wasm_on_message_begin: (p) => {
-            assert.strictEqual(currentParser.ptr, p);
+            assert(currentParser.ptr === p);
             return currentParser.onMessageBegin() || 0;
           },
           wasm_on_header_field: (p, at, len) => {
-            assert.strictEqual(currentParser.ptr, p);
+            assert(currentParser.ptr === p);
             const start = at - currentBufferPtr + currentBufferRef.byteOffset;
             return currentParser.onHeaderField(new FastBuffer(currentBufferRef.buffer, start, len)) || 0;
           },
           wasm_on_header_value: (p, at, len) => {
-            assert.strictEqual(currentParser.ptr, p);
+            assert(currentParser.ptr === p);
             const start = at - currentBufferPtr + currentBufferRef.byteOffset;
             return currentParser.onHeaderValue(new FastBuffer(currentBufferRef.buffer, start, len)) || 0;
           },
           wasm_on_headers_complete: (p, statusCode, upgrade, shouldKeepAlive) => {
-            assert.strictEqual(currentParser.ptr, p);
+            assert(currentParser.ptr === p);
             return currentParser.onHeadersComplete(statusCode, Boolean(upgrade), Boolean(shouldKeepAlive)) || 0;
           },
           wasm_on_body: (p, at, len) => {
-            assert.strictEqual(currentParser.ptr, p);
+            assert(currentParser.ptr === p);
             const start = at - currentBufferPtr + currentBufferRef.byteOffset;
             return currentParser.onBody(new FastBuffer(currentBufferRef.buffer, start, len)) || 0;
           },
           wasm_on_message_complete: (p) => {
-            assert.strictEqual(currentParser.ptr, p);
+            assert(currentParser.ptr === p);
             return currentParser.onMessageComplete() || 0;
           }
           /* eslint-enable camelcase */
@@ -5572,9 +5862,11 @@ var require_client_h1 = __commonJS({
     var currentBufferRef = null;
     var currentBufferSize = 0;
     var currentBufferPtr = null;
-    var TIMEOUT_HEADERS = 1;
-    var TIMEOUT_BODY = 2;
-    var TIMEOUT_IDLE = 3;
+    var USE_NATIVE_TIMER = 0;
+    var USE_FAST_TIMER = 1;
+    var TIMEOUT_HEADERS = 2 | USE_FAST_TIMER;
+    var TIMEOUT_BODY = 4 | USE_FAST_TIMER;
+    var TIMEOUT_KEEP_ALIVE = 8 | USE_NATIVE_TIMER;
     var Parser = class {
       static {
         __name(this, "Parser");
@@ -5603,24 +5895,27 @@ var require_client_h1 = __commonJS({
         this.connection = "";
         this.maxResponseSize = client[kMaxResponseSize];
       }
-      setTimeout(value, type) {
-        this.timeoutType = type;
-        if (value !== this.timeoutValue) {
-          timers.clearTimeout(this.timeout);
-          if (value) {
-            this.timeout = timers.setTimeout(onParserTimeout, value, this);
-            if (this.timeout.unref) {
-              this.timeout.unref();
-            }
-          } else {
+      setTimeout(delay, type) {
+        if (delay !== this.timeoutValue || type & USE_FAST_TIMER ^ this.timeoutType & USE_FAST_TIMER) {
+          if (this.timeout) {
+            timers.clearTimeout(this.timeout);
             this.timeout = null;
           }
-          this.timeoutValue = value;
+          if (delay) {
+            if (type & USE_FAST_TIMER) {
+              this.timeout = timers.setFastTimeout(onParserTimeout, delay, new WeakRef(this));
+            } else {
+              this.timeout = setTimeout(onParserTimeout, delay, new WeakRef(this));
+              this.timeout.unref();
+            }
+          }
+          this.timeoutValue = delay;
         } else if (this.timeout) {
           if (this.timeout.refresh) {
             this.timeout.refresh();
           }
         }
+        this.timeoutType = type;
       }
       resume() {
         if (this.socket.destroyed || !this.paused) {
@@ -5697,7 +5992,7 @@ var require_client_h1 = __commonJS({
         assert(currentParser == null);
         this.llhttp.llhttp_free(this.ptr);
         this.ptr = null;
-        timers.clearTimeout(this.timeout);
+        this.timeout && timers.clearTimeout(this.timeout);
         this.timeout = null;
         this.timeoutValue = null;
         this.timeoutType = null;
@@ -5756,16 +6051,16 @@ var require_client_h1 = __commonJS({
       onUpgrade(head) {
         const { upgrade, client, socket, headers, statusCode } = this;
         assert(upgrade);
+        assert(client[kSocket] === socket);
+        assert(!socket.destroyed);
+        assert(!this.paused);
+        assert((headers.length & 1) === 0);
         const request = client[kQueue][client[kRunningIdx]];
         assert(request);
-        assert(!socket.destroyed);
-        assert(socket === client[kSocket]);
-        assert(!this.paused);
         assert(request.upgrade || request.method === "CONNECT");
         this.statusCode = null;
         this.statusText = "";
         this.shouldKeepAlive = null;
-        assert(this.headers.length % 2 === 0);
         this.headers = [];
         this.headersSize = 0;
         socket.unshift(head);
@@ -5804,7 +6099,7 @@ var require_client_h1 = __commonJS({
           util.destroy(socket, new SocketError("bad upgrade", util.getSocketInfo(socket)));
           return -1;
         }
-        assert.strictEqual(this.timeoutType, TIMEOUT_HEADERS);
+        assert(this.timeoutType === TIMEOUT_HEADERS);
         this.statusCode = statusCode;
         this.shouldKeepAlive = shouldKeepAlive || // Override llhttp value which does not allow keepAlive for HEAD.
         request.method === "HEAD" && !socket[kReset] && this.connection.toLowerCase() === "keep-alive";
@@ -5826,7 +6121,7 @@ var require_client_h1 = __commonJS({
           this.upgrade = true;
           return 2;
         }
-        assert(this.headers.length % 2 === 0);
+        assert((this.headers.length & 1) === 0);
         this.headers = [];
         this.headersSize = 0;
         if (this.shouldKeepAlive && client[kPipelining]) {
@@ -5870,7 +6165,7 @@ var require_client_h1 = __commonJS({
         }
         const request = client[kQueue][client[kRunningIdx]];
         assert(request);
-        assert.strictEqual(this.timeoutType, TIMEOUT_BODY);
+        assert(this.timeoutType === TIMEOUT_BODY);
         if (this.timeout) {
           if (this.timeout.refresh) {
             this.timeout.refresh();
@@ -5894,16 +6189,16 @@ var require_client_h1 = __commonJS({
         if (upgrade) {
           return;
         }
+        assert(statusCode >= 100);
+        assert((this.headers.length & 1) === 0);
         const request = client[kQueue][client[kRunningIdx]];
         assert(request);
-        assert(statusCode >= 100);
         this.statusCode = null;
         this.statusText = "";
         this.bytesRead = 0;
         this.contentLength = "";
         this.keepAlive = "";
         this.connection = "";
-        assert(this.headers.length % 2 === 0);
         this.headers = [];
         this.headersSize = 0;
         if (statusCode < 200) {
@@ -5916,7 +6211,7 @@ var require_client_h1 = __commonJS({
         request.onComplete(headers);
         client[kQueue][client[kRunningIdx]++] = null;
         if (socket[kWriting]) {
-          assert.strictEqual(client[kRunning], 0);
+          assert(client[kRunning] === 0);
           util.destroy(socket, new InformationalError("reset"));
           return constants.ERROR.PAUSED;
         } else if (!shouldKeepAlive) {
@@ -5933,17 +6228,17 @@ var require_client_h1 = __commonJS({
       }
     };
     function onParserTimeout(parser) {
-      const { socket, timeoutType, client } = parser;
+      const { socket, timeoutType, client, paused } = parser.deref();
       if (timeoutType === TIMEOUT_HEADERS) {
         if (!socket[kWriting] || socket.writableNeedDrain || client[kRunning] > 1) {
-          assert(!parser.paused, "cannot be paused while waiting for headers");
+          assert(!paused, "cannot be paused while waiting for headers");
           util.destroy(socket, new HeadersTimeoutError());
         }
       } else if (timeoutType === TIMEOUT_BODY) {
-        if (!parser.paused) {
+        if (!paused) {
           util.destroy(socket, new BodyTimeoutError());
         }
-      } else if (timeoutType === TIMEOUT_IDLE) {
+      } else if (timeoutType === TIMEOUT_KEEP_ALIVE) {
         assert(client[kRunning] === 0 && client[kKeepAliveTimeoutValue]);
         util.destroy(socket, new InformationalError("socket idle timeout"));
       }
@@ -5961,8 +6256,8 @@ var require_client_h1 = __commonJS({
       socket[kBlocking] = false;
       socket[kParser] = new Parser(client, socket, llhttpInstance);
       addListener(socket, "error", function(err) {
-        const parser = this[kParser];
         assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
+        const parser = this[kParser];
         if (err.code === "ECONNRESET" && parser.statusCode && !parser.shouldKeepAlive) {
           parser.onMessageComplete();
           return;
@@ -6070,8 +6365,8 @@ var require_client_h1 = __commonJS({
           socket[kNoRef] = false;
         }
         if (client[kSize] === 0) {
-          if (socket[kParser].timeoutType !== TIMEOUT_IDLE) {
-            socket[kParser].setTimeout(client[kKeepAliveTimeoutValue], TIMEOUT_IDLE);
+          if (socket[kParser].timeoutType !== TIMEOUT_KEEP_ALIVE) {
+            socket[kParser].setTimeout(client[kKeepAliveTimeoutValue], TIMEOUT_KEEP_ALIVE);
           }
         } else if (client[kRunning] > 0 && socket[kParser].statusCode < 200) {
           if (socket[kParser].timeoutType !== TIMEOUT_HEADERS) {
@@ -6090,7 +6385,7 @@ var require_client_h1 = __commonJS({
     function writeH1(client, request) {
       const { method, path, host, upgrade, blocking, reset } = request;
       let { body, headers, contentLength } = request;
-      const expectsPayload = method === "PUT" || method === "POST" || method === "PATCH";
+      const expectsPayload = method === "PUT" || method === "POST" || method === "PATCH" || method === "QUERY" || method === "PROPFIND" || method === "PROPPATCH";
       if (util.isFormDataLike(body)) {
         if (!extractBody) {
           extractBody = require_body().extractBody;
@@ -6190,26 +6485,26 @@ upgrade: ${upgrade}\r
         channels.sendHeaders.publish({ request, headers: header, socket });
       }
       if (!body || bodyLength === 0) {
-        writeBuffer({ abort, body: null, client, request, socket, contentLength, header, expectsPayload });
+        writeBuffer(abort, null, client, request, socket, contentLength, header, expectsPayload);
       } else if (util.isBuffer(body)) {
-        writeBuffer({ abort, body, client, request, socket, contentLength, header, expectsPayload });
+        writeBuffer(abort, body, client, request, socket, contentLength, header, expectsPayload);
       } else if (util.isBlobLike(body)) {
         if (typeof body.stream === "function") {
-          writeIterable({ abort, body: body.stream(), client, request, socket, contentLength, header, expectsPayload });
+          writeIterable(abort, body.stream(), client, request, socket, contentLength, header, expectsPayload);
         } else {
-          writeBlob({ abort, body, client, request, socket, contentLength, header, expectsPayload });
+          writeBlob(abort, body, client, request, socket, contentLength, header, expectsPayload);
         }
       } else if (util.isStream(body)) {
-        writeStream({ abort, body, client, request, socket, contentLength, header, expectsPayload });
+        writeStream(abort, body, client, request, socket, contentLength, header, expectsPayload);
       } else if (util.isIterable(body)) {
-        writeIterable({ abort, body, client, request, socket, contentLength, header, expectsPayload });
+        writeIterable(abort, body, client, request, socket, contentLength, header, expectsPayload);
       } else {
         assert(false);
       }
       return true;
     }
     __name(writeH1, "writeH1");
-    function writeStream({ abort, body, client, request, socket, contentLength, header, expectsPayload }) {
+    function writeStream(abort, body, client, request, socket, contentLength, header, expectsPayload) {
       assert(contentLength !== 0 || client[kRunning] === 0, "stream body cannot be pipelined");
       let finished = false;
       const writer = new AsyncWriter({ abort, socket, request, contentLength, client, expectsPayload, header });
@@ -6279,7 +6574,7 @@ upgrade: ${upgrade}\r
       }
     }
     __name(writeStream, "writeStream");
-    function writeBuffer({ abort, body, client, request, socket, contentLength, header, expectsPayload }) {
+    function writeBuffer(abort, body, client, request, socket, contentLength, header, expectsPayload) {
       try {
         if (!body) {
           if (contentLength === 0) {
@@ -6300,7 +6595,7 @@ upgrade: ${upgrade}\r
           socket.write(body);
           socket.uncork();
           request.onBodySent(body);
-          if (!expectsPayload) {
+          if (!expectsPayload && request.reset !== false) {
             socket[kReset] = true;
           }
         }
@@ -6311,7 +6606,7 @@ upgrade: ${upgrade}\r
       }
     }
     __name(writeBuffer, "writeBuffer");
-    async function writeBlob({ abort, body, client, request, socket, contentLength, header, expectsPayload }) {
+    async function writeBlob(abort, body, client, request, socket, contentLength, header, expectsPayload) {
       assert(contentLength === body.size, "blob body must have content length");
       try {
         if (contentLength != null && contentLength !== body.size) {
@@ -6326,7 +6621,7 @@ upgrade: ${upgrade}\r
         socket.uncork();
         request.onBodySent(buffer);
         request.onRequestSent();
-        if (!expectsPayload) {
+        if (!expectsPayload && request.reset !== false) {
           socket[kReset] = true;
         }
         client[kResume]();
@@ -6335,7 +6630,7 @@ upgrade: ${upgrade}\r
       }
     }
     __name(writeBlob, "writeBlob");
-    async function writeIterable({ abort, body, client, request, socket, contentLength, header, expectsPayload }) {
+    async function writeIterable(abort, body, client, request, socket, contentLength, header, expectsPayload) {
       assert(contentLength !== 0 || client[kRunning] === 0, "iterator body cannot be pipelined");
       let callback = null;
       function onDrain() {
@@ -6408,7 +6703,7 @@ upgrade: ${upgrade}\r
         }
         socket.cork();
         if (bytesWritten === 0) {
-          if (!expectsPayload) {
+          if (!expectsPayload && request.reset !== false) {
             socket[kReset] = true;
           }
           if (contentLength === null) {
@@ -6515,7 +6810,9 @@ var require_client_h2 = __commonJS({
       kOnError,
       kMaxConcurrentStreams,
       kHTTP2Session,
-      kResume
+      kResume,
+      kSize,
+      kHTTPContext
     } = require_symbols();
     var kOpenStreams = Symbol("open streams");
     var h2ExperimentalWarned = false;
@@ -6613,9 +6910,10 @@ var require_client_h2 = __commonJS({
         version: "h2",
         defaultPipelining: Infinity,
         write(...args) {
-          writeH2(client, ...args);
+          return writeH2(client, ...args);
         },
         resume() {
+          resumeH2(client);
         },
         destroy(err, callback) {
           if (closed) {
@@ -6633,6 +6931,19 @@ var require_client_h2 = __commonJS({
       };
     }
     __name(connectH2, "connectH2");
+    function resumeH2(client) {
+      const socket = client[kSocket];
+      if (socket?.destroyed === false) {
+        if (client[kSize] === 0 && client[kMaxConcurrentStreams] === 0) {
+          socket.unref();
+          client[kHTTP2Session].unref();
+        } else {
+          socket.ref();
+          client[kHTTP2Session].ref();
+        }
+      }
+    }
+    __name(resumeH2, "resumeH2");
     function onHttp2SessionError(err) {
       assert(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
       this[kSocket][kError] = err;
@@ -6654,11 +6965,22 @@ var require_client_h2 = __commonJS({
     }
     __name(onHttp2SessionEnd, "onHttp2SessionEnd");
     function onHTTP2GoAway(code) {
-      const err = new RequestAbortedError(`HTTP/2: "GOAWAY" frame received with code ${code}`);
-      this[kSocket][kError] = err;
-      this[kClient][kOnError](err);
-      this.unref();
+      const err = this[kError] || new SocketError(`HTTP/2: "GOAWAY" frame received with code ${code}`, util.getSocketInfo(this));
+      const client = this[kClient];
+      client[kSocket] = null;
+      client[kHTTPContext] = null;
+      if (this[kHTTP2Session] != null) {
+        this[kHTTP2Session].destroy(err);
+        this[kHTTP2Session] = null;
+      }
       util.destroy(this[kSocket], err);
+      const request = client[kQueue][client[kRunningIdx]];
+      client[kQueue][client[kRunningIdx]++] = null;
+      util.errorRequest(client, request, err);
+      client[kPendingIdx] = client[kRunningIdx];
+      assert(client[kRunning] === 0);
+      client.emit("disconnect", client[kUrl], [client], err);
+      client[kResume]();
     }
     __name(onHTTP2GoAway, "onHTTP2GoAway");
     function shouldSendContentLength(method) {
@@ -6670,9 +6992,6 @@ var require_client_h2 = __commonJS({
       const { body, method, path, host, upgrade, expectContinue, signal, headers: reqHeaders } = request;
       if (upgrade) {
         util.errorRequest(client, request, new Error("Upgrade not supported for H2"));
-        return false;
-      }
-      if (request.aborted) {
         return false;
       }
       const headers = {};
@@ -6705,11 +7024,16 @@ var require_client_h2 = __commonJS({
           util.destroy(stream, err);
         }
         util.destroy(body, err);
+        client[kQueue][client[kRunningIdx]++] = null;
+        client[kResume]();
       }, "abort");
       try {
         request.onConnect(abort);
       } catch (err) {
         util.errorRequest(client, request, err);
+      }
+      if (request.aborted) {
+        return false;
       }
       if (method === "CONNECT") {
         session.ref();
@@ -6717,10 +7041,12 @@ var require_client_h2 = __commonJS({
         if (stream.id && !stream.pending) {
           request.onUpgrade(null, null, stream);
           ++session[kOpenStreams];
+          client[kQueue][client[kRunningIdx]++] = null;
         } else {
           stream.once("ready", () => {
             request.onUpgrade(null, null, stream);
             ++session[kOpenStreams];
+            client[kQueue][client[kRunningIdx]++] = null;
           });
         }
         stream.once("close", () => {
@@ -6789,12 +7115,14 @@ var require_client_h2 = __commonJS({
       stream.once("end", () => {
         if (stream.state?.state == null || stream.state.state < 6) {
           request.onComplete([]);
-          return;
         }
         if (session[kOpenStreams] === 0) {
           session.unref();
         }
         abort(new InformationalError("HTTP/2: stream half-closed (remote)"));
+        client[kQueue][client[kRunningIdx]++] = null;
+        client[kPendingIdx] = client[kRunningIdx];
+        client[kResume]();
       });
       stream.once("close", () => {
         session[kOpenStreams] -= 1;
@@ -6811,75 +7139,73 @@ var require_client_h2 = __commonJS({
       return true;
       function writeBodyH2() {
         if (!body || contentLength === 0) {
-          writeBuffer({
+          writeBuffer(
             abort,
+            stream,
+            null,
             client,
             request,
+            client[kSocket],
             contentLength,
-            expectsPayload,
-            h2stream: stream,
-            body: null,
-            socket: client[kSocket]
-          });
+            expectsPayload
+          );
         } else if (util.isBuffer(body)) {
-          writeBuffer({
+          writeBuffer(
             abort,
+            stream,
+            body,
             client,
             request,
+            client[kSocket],
             contentLength,
-            body,
-            expectsPayload,
-            h2stream: stream,
-            socket: client[kSocket]
-          });
+            expectsPayload
+          );
         } else if (util.isBlobLike(body)) {
           if (typeof body.stream === "function") {
-            writeIterable({
+            writeIterable(
               abort,
+              stream,
+              body.stream(),
               client,
               request,
+              client[kSocket],
               contentLength,
-              expectsPayload,
-              h2stream: stream,
-              body: body.stream(),
-              socket: client[kSocket]
-            });
+              expectsPayload
+            );
           } else {
-            writeBlob({
+            writeBlob(
               abort,
+              stream,
               body,
               client,
               request,
+              client[kSocket],
               contentLength,
-              expectsPayload,
-              h2stream: stream,
-              socket: client[kSocket]
-            });
+              expectsPayload
+            );
           }
         } else if (util.isStream(body)) {
-          writeStream({
+          writeStream(
             abort,
+            client[kSocket],
+            expectsPayload,
+            stream,
             body,
             client,
             request,
-            contentLength,
-            expectsPayload,
-            socket: client[kSocket],
-            h2stream: stream,
-            header: ""
-          });
+            contentLength
+          );
         } else if (util.isIterable(body)) {
-          writeIterable({
+          writeIterable(
             abort,
+            stream,
             body,
             client,
             request,
+            client[kSocket],
             contentLength,
-            expectsPayload,
-            header: "",
-            h2stream: stream,
-            socket: client[kSocket]
-          });
+            expectsPayload
+          );
         } else {
           assert(false);
         }
@@ -6887,7 +7213,7 @@ var require_client_h2 = __commonJS({
       __name(writeBodyH2, "writeBodyH2");
     }
     __name(writeH2, "writeH2");
-    function writeBuffer({ abort, h2stream, body, client, request, socket, contentLength, expectsPayload }) {
+    function writeBuffer(abort, h2stream, body, client, request, socket, contentLength, expectsPayload) {
       try {
         if (body != null && util.isBuffer(body)) {
           assert(contentLength === body.byteLength, "buffer body must have content length");
@@ -6907,7 +7233,7 @@ var require_client_h2 = __commonJS({
       }
     }
     __name(writeBuffer, "writeBuffer");
-    function writeStream({ abort, socket, expectsPayload, h2stream, body, client, request, contentLength }) {
+    function writeStream(abort, socket, expectsPayload, h2stream, body, client, request, contentLength) {
       assert(contentLength !== 0 || client[kRunning] === 0, "stream body cannot be pipelined");
       const pipe = pipeline(
         body,
@@ -6933,7 +7259,7 @@ var require_client_h2 = __commonJS({
       __name(onPipeData, "onPipeData");
     }
     __name(writeStream, "writeStream");
-    async function writeBlob({ abort, h2stream, body, client, request, socket, contentLength, expectsPayload }) {
+    async function writeBlob(abort, h2stream, body, client, request, socket, contentLength, expectsPayload) {
       assert(contentLength === body.size, "blob body must have content length");
       try {
         if (contentLength != null && contentLength !== body.size) {
@@ -6955,7 +7281,7 @@ var require_client_h2 = __commonJS({
       }
     }
     __name(writeBlob, "writeBlob");
-    async function writeIterable({ abort, h2stream, body, client, request, socket, contentLength, expectsPayload }) {
+    async function writeIterable(abort, h2stream, body, client, request, socket, contentLength, expectsPayload) {
       assert(contentLength !== 0 || client[kRunning] === 0, "iterator body cannot be pipelined");
       let callback = null;
       function onDrain() {
@@ -7257,6 +7583,8 @@ var require_client = __commonJS({
     var connectH2 = require_client_h2();
     var deprecatedInterceptorWarned = false;
     var kClosedResolve = Symbol("kClosedResolve");
+    var noop = /* @__PURE__ */ __name(() => {
+    }, "noop");
     function getPipelining(client) {
       return client[kPipelining] ?? client[kHTTPContext]?.defaultPipelining ?? 1;
     }
@@ -7550,16 +7878,14 @@ var require_client = __commonJS({
           });
         });
         if (client.destroyed) {
-          util.destroy(socket.on("error", () => {
-          }), new ClientDestroyedError());
+          util.destroy(socket.on("error", noop), new ClientDestroyedError());
           return;
         }
         assert(socket);
         try {
           client[kHTTPContext] = socket.alpnProtocol === "h2" ? await connectH2(client, socket) : await connectH1(client, socket);
         } catch (err) {
-          socket.destroy().on("error", () => {
-          });
+          socket.destroy().on("error", noop);
           throw err;
         }
         client[kConnecting] = false;
@@ -7949,6 +8275,8 @@ var require_proxy_agent = __commonJS({
       return new Pool(origin, opts);
     }
     __name(defaultFactory, "defaultFactory");
+    var noop = /* @__PURE__ */ __name(() => {
+    }, "noop");
     var ProxyAgent = class extends DispatcherBase {
       static {
         __name(this, "ProxyAgent");
@@ -8001,8 +8329,7 @@ var require_proxy_agent = __commonJS({
                 servername: this[kProxyTls]?.servername || proxyHostname
               });
               if (statusCode !== 200) {
-                socket.on("error", () => {
-                }).destroy();
+                socket.on("error", noop).destroy();
                 callback(new RequestAbortedError(`Proxy response (${statusCode}) !== 200 when HTTP Tunneling`));
               }
               if (opts2.protocol !== "https:") {
@@ -8645,14 +8972,6 @@ var require_headers = __commonJS({
       },
       [util.inspect.custom]: {
         enumerable: false
-      },
-      // Compatibility for global headers
-      [Symbol("headers list")]: {
-        configurable: false,
-        enumerable: false,
-        get: function() {
-          return getHeadersList(this);
-        }
       }
     });
     webidl.converters.HeadersInit = function(V, prefix, argument) {
@@ -8694,7 +9013,7 @@ var require_response = __commonJS({
   "lib/web/fetch/response.js"(exports2, module2) {
     "use strict";
     var { Headers, HeadersList, fill, getHeadersGuard, setHeadersGuard, setHeadersList } = require_headers();
-    var { extractBody, cloneBody, mixinBody } = require_body();
+    var { extractBody, cloneBody, mixinBody, hasFinalizationRegistry, streamRegistry, bodyUnusable } = require_body();
     var util = require_util();
     var nodeUtil = require("node:util");
     var { kEnumerableProperty } = util;
@@ -8719,20 +9038,7 @@ var require_response = __commonJS({
     var { kConstruct } = require_symbols();
     var assert = require("node:assert");
     var { types } = require("node:util");
-    var { isDisturbed, isErrored } = require("node:stream");
     var textEncoder = new TextEncoder("utf-8");
-    var hasFinalizationRegistry = globalThis.FinalizationRegistry && process.version.indexOf("v18") !== 0;
-    var registry;
-    if (hasFinalizationRegistry) {
-      registry = new FinalizationRegistry((stream) => {
-        if (!stream.locked && !isDisturbed(stream) && !isErrored(stream)) {
-          stream.cancel("Response object has been garbage collected").catch(noop);
-        }
-      });
-    }
-    function noop() {
-    }
-    __name(noop, "noop");
     var Response = class _Response {
       static {
         __name(this, "Response");
@@ -8847,7 +9153,7 @@ var require_response = __commonJS({
       // Returns a clone of response.
       clone() {
         webidl.brandCheck(this, _Response);
-        if (this.bodyUsed || this.body?.locked) {
+        if (bodyUnusable(this)) {
           throw webidl.errors.exception({
             header: "Response.clone",
             message: "Body has already been consumed."
@@ -8906,7 +9212,7 @@ var require_response = __commonJS({
       }
       const newResponse = makeResponse({ ...response, body: null });
       if (response.body != null) {
-        newResponse.body = cloneBody(response.body);
+        newResponse.body = cloneBody(newResponse, response.body);
       }
       return newResponse;
     }
@@ -9039,7 +9345,7 @@ var require_response = __commonJS({
       setHeadersList(response[kHeaders], innerResponse.headersList);
       setHeadersGuard(response[kHeaders], guard);
       if (hasFinalizationRegistry && innerResponse.body?.stream) {
-        registry.register(response, innerResponse.body.stream);
+        streamRegistry.register(response, new WeakRef(innerResponse.body.stream));
       }
       return response;
     }
@@ -9161,7 +9467,7 @@ var require_dispatcher_weakref = __commonJS({
 var require_request2 = __commonJS({
   "lib/web/fetch/request.js"(exports2, module2) {
     "use strict";
-    var { extractBody, mixinBody, cloneBody } = require_body();
+    var { extractBody, mixinBody, cloneBody, bodyUnusable } = require_body();
     var { Headers, fill: fillHeaders, HeadersList, setHeadersGuard, getHeadersGuard, setHeadersList, getHeadersList } = require_headers();
     var { FinalizationRegistry: FinalizationRegistry2 } = require_dispatcher_weakref()();
     var util = require_util();
@@ -9169,9 +9475,7 @@ var require_request2 = __commonJS({
     var {
       isValidHTTPToken,
       sameOrigin,
-      normalizeMethod,
-      environmentSettingsObject,
-      normalizeMethodRecord
+      environmentSettingsObject
     } = require_util2();
     var {
       forbiddenMethodsSet,
@@ -9183,7 +9487,7 @@ var require_request2 = __commonJS({
       requestCache,
       requestDuplex
     } = require_constants3();
-    var { kEnumerableProperty } = util;
+    var { kEnumerableProperty, normalizedMethodRecordsBase, normalizedMethodRecords } = util;
     var { kHeaders, kSignal, kState, kDispatcher } = require_symbols2();
     var { webidl } = require_webidl();
     var { URLSerializer } = require_data_url();
@@ -9385,17 +9689,18 @@ var require_request2 = __commonJS({
         }
         if (init.method !== void 0) {
           let method = init.method;
-          const mayBeNormalized = normalizeMethodRecord[method];
+          const mayBeNormalized = normalizedMethodRecords[method];
           if (mayBeNormalized !== void 0) {
             request.method = mayBeNormalized;
           } else {
             if (!isValidHTTPToken(method)) {
               throw new TypeError(`'${method}' is not a valid HTTP method.`);
             }
-            if (forbiddenMethodsSet.has(method.toUpperCase())) {
+            const upperCase = method.toUpperCase();
+            if (forbiddenMethodsSet.has(upperCase)) {
               throw new TypeError(`'${method}' HTTP method is unsupported.`);
             }
-            method = normalizeMethod(method);
+            method = normalizedMethodRecordsBase[upperCase] ?? method;
             request.method = method;
           }
           if (!patchMethodWarning && request.method === "patch") {
@@ -9488,7 +9793,7 @@ var require_request2 = __commonJS({
         }
         let finalBody = inputOrInitBody;
         if (initBody == null && inputBody != null) {
-          if (util.isDisturbed(inputBody.stream) || inputBody.stream.locked) {
+          if (bodyUnusable(input)) {
             throw new TypeError(
               "Cannot construct a Request with a Request object that has already been used."
             );
@@ -9623,7 +9928,7 @@ var require_request2 = __commonJS({
       // Returns a clone of request.
       clone() {
         webidl.brandCheck(this, _Request);
-        if (this.bodyUsed || this.body?.locked) {
+        if (bodyUnusable(this)) {
           throw new TypeError("unusable");
         }
         const clonedRequest = cloneRequest(this[kState]);
@@ -9717,7 +10022,7 @@ var require_request2 = __commonJS({
     function cloneRequest(request) {
       const newRequest = makeRequest({ ...request, body: null });
       if (request.body != null) {
-        newRequest.body = cloneBody(request.body);
+        newRequest.body = cloneBody(newRequest, request.body);
       }
       return newRequest;
     }
@@ -10858,22 +11163,31 @@ var require_fetch = __commonJS({
                       finishFlush: zlib.constants.Z_SYNC_FLUSH
                     }));
                   } else if (coding === "deflate") {
-                    decoders.push(createInflate());
+                    decoders.push(createInflate({
+                      flush: zlib.constants.Z_SYNC_FLUSH,
+                      finishFlush: zlib.constants.Z_SYNC_FLUSH
+                    }));
                   } else if (coding === "br") {
-                    decoders.push(zlib.createBrotliDecompress());
+                    decoders.push(zlib.createBrotliDecompress({
+                      flush: zlib.constants.BROTLI_OPERATION_FLUSH,
+                      finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH
+                    }));
                   } else {
                     decoders.length = 0;
                     break;
                   }
                 }
               }
+              const onError = this.onError.bind(this);
               resolve({
                 status,
                 statusText,
                 headersList,
-                body: decoders.length ? pipeline(this.body, ...decoders, () => {
-                }) : this.body.on("error", () => {
-                })
+                body: decoders.length ? pipeline(this.body, ...decoders, (err) => {
+                  if (err) {
+                    this.onError(err);
+                  }
+                }).on("error", onError) : this.body.on("error", onError)
               });
               return true;
             },
@@ -12219,7 +12533,6 @@ var require_websocket = __commonJS({
     var { types } = require("node:util");
     var { ErrorEvent: ErrorEvent2, CloseEvent: CloseEvent2 } = require_events();
     var { SendQueue } = require_sender();
-    var experimentalWarned = false;
     var WebSocket = class _WebSocket extends EventTarget {
       static {
         __name(this, "WebSocket");
@@ -12243,12 +12556,6 @@ var require_websocket = __commonJS({
         super();
         const prefix = "WebSocket constructor";
         webidl.argumentLengthCheck(arguments, 1, prefix);
-        if (!experimentalWarned) {
-          experimentalWarned = true;
-          process.emitWarning("WebSockets are experimental, expect them to change at any time.", {
-            code: "UNDICI-WS"
-          });
-        }
         const options = webidl.converters["DOMString or sequence<DOMString> or WebSocketInit"](protocols, prefix, "options");
         url = webidl.converters.USVString(url, prefix, "url");
         protocols = options.protocols;
@@ -13177,11 +13484,5 @@ module.exports.EventSource = require_eventsource().EventSource;
 module.exports.EnvHttpProxyAgent = EnvHttpProxyAgent;
 module.exports.getGlobalDispatcher = getGlobalDispatcher;
 module.exports.setGlobalDispatcher = setGlobalDispatcher;
-/*! Bundled license information:
-
-undici/lib/web/fetch/body.js:
-  (*! formdata-polyfill. MIT License. Jimmy Wärting <https://jimmy.warting.se/opensource> *)
-
-undici/lib/web/websocket/frame.js:
-  (*! ws. MIT License. Einar Otto Stangvik <einaros@gmail.com> *)
-*/
+/*! formdata-polyfill. MIT License. Jimmy Wärting <https://jimmy.warting.se/opensource> */
+/*! ws. MIT License. Einar Otto Stangvik <einaros@gmail.com> */

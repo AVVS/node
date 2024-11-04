@@ -2,14 +2,7 @@
 #define SRC_NODE_HTTP_COMMON_INL_H_
 
 #include <algorithm>
-#include "env-inl.h"
-#include "node.h"
-#include "node_http_common.h"
-#include "node_mem-inl.h"
-#include "node_errors.h"
-#include "v8.h"
-#include "nghttp2/nghttp2.h"
-#include "ada.h"
+#include "nbytes.h"
 
 namespace node {
 
@@ -41,7 +34,7 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Array> headers) {
                                  count_ * sizeof(nv_t) +
                                  header_string_len);
 
-  char* start = AlignUp(buf_.out(), alignof(nv_t));
+  char* start = nbytes::AlignUp(buf_.out(), alignof(nv_t));
   char* header_contents = start + (count_ * sizeof(nv_t));
   nv_t* const nva = reinterpret_cast<nv_t*>(start);
 

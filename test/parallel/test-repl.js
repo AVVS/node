@@ -129,6 +129,17 @@ const strictModeTests = [
   },
 ];
 
+const possibleTokensAfterIdentifierWithLineBreak = [
+  '(\n)',
+  '[\n0]',
+  '+\n1', '- \n1', '* \n1', '/ \n1', '% \n1', '** \n1',
+  '== \n1', '=== \n1', '!= \n1', '!== \n1', '< \n1', '> \n1', '<= \n1', '>= \n1',
+  '&& \n1', '|| \n1', '?? \n1',
+  '= \n1', '+= \n1', '-= \n1', '*= \n1', '/= \n1', '%= \n1',
+  ': \n',
+  '? \n1: 1',
+];
+
 const errorTests = [
   // Uncaught error throws and prints out
   {
@@ -387,6 +398,16 @@ const errorTests = [
     ]
   },
   {
+    send: 'let npm = () => {};',
+    expect: 'undefined'
+  },
+  ...possibleTokensAfterIdentifierWithLineBreak.map((token) => (
+    {
+      send: `npm ${token}; undefined`,
+      expect: '... undefined'
+    }
+  )),
+  {
     send: '(function() {\n\nreturn 1;\n})()',
     expect: '... ... ... 1'
   },
@@ -577,10 +598,12 @@ const errorTests = [
       /^Uncaught Error: Cannot find module 'internal\/repl'/,
       /^Require stack:/,
       /^- <repl>/,
-      /^ {4}at .*/,
-      /^ {4}at .*/,
-      /^ {4}at .*/,
-      /^ {4}at .*/,
+      /^ {4}at .*/, // at Module._resolveFilename
+      /^ {4}at .*/, // at Module._load
+      /^ {4}at .*/, // at TracingChannel.traceSync
+      /^ {4}at .*/, // at wrapModuleLoad
+      /^ {4}at .*/, // at Module.require
+      /^ {4}at .*/, // at require
       "  code: 'MODULE_NOT_FOUND',",
       "  requireStack: [ '<repl>' ]",
       '}',
@@ -770,7 +793,6 @@ const errorTests = [
       'Object [console] {',
       '  log: [Function: log],',
       '  warn: [Function: warn],',
-      '  error: [Function: error],',
       '  dir: [Function: dir],',
       '  time: [Function: time],',
       '  timeEnd: [Function: timeEnd],',
@@ -786,6 +808,7 @@ const errorTests = [
       / {2}debug: \[Function: (debug|log)],/,
       / {2}info: \[Function: (info|log)],/,
       / {2}dirxml: \[Function: (dirxml|log)],/,
+      / {2}error: \[Function: (error|warn)],/,
       / {2}groupCollapsed: \[Function: (groupCollapsed|group)],/,
       / {2}Console: \[Function: Console],?/,
       ...process.features.inspector ? [

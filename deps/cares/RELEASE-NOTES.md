@@ -1,49 +1,66 @@
-## c-ares version 1.28.1 - Mar 30 2024
+## c-ares version 1.34.2 - October 15 2024
 
-This release contains a fix for a single significant regression introduced
-in c-ares 1.28.0.
+This release contains a fix for downstream packages detecting the c-ares
+version based on the contents of the header file rather than the
+distributed pkgconf or cmake files.
 
-* `ares_search()` and `ares_getaddrinfo()` resolution fails if no search domains
-  are specified. [Issue #737](https://github.com/c-ares/c-ares/issues/737)
+## c-ares version 1.34.1 - October 9 2024
+
+This release fixes a packaging issue.
 
 
-## c-ares version 1.28.0 - Mar 29 2024
+## c-ares version 1.34.0 - October 9 2024
 
 This is a feature and bugfix release.
 
 Features:
-
-* Emit warnings when deprecated c-ares functions are used.  This can be
-  disabled by passing a compiler definition of `CARES_NO_DEPRECATED`. [PR #732](https://github.com/c-ares/c-ares/pull/732)
-* Add function `ares_search_dnsrec()` to search for records using the new DNS
-  record data structures. [PR #719](https://github.com/c-ares/c-ares/pull/719)
-* Rework internals to pass around `ares_dns_record_t` instead of binary data,
-  this introduces new public functions of `ares_query_dnsrec()` and
-  `ares_send_dnsrec()`. [PR #730](https://github.com/c-ares/c-ares/pull/730)
+* adig: read arguments from adigrc.
+  [PR #856](https://github.com/c-ares/c-ares/pull/856)
+* Add new pending write callback optimization via `ares_set_pending_write_cb`.
+  [PR #857](https://github.com/c-ares/c-ares/pull/857)
+* New function `ares_process_fds()`.
+  [PR #875](https://github.com/c-ares/c-ares/pull/875)
+* Failed servers should be probed rather than redirecting queries which could
+  cause unexpected latency.
+  [PR #877](https://github.com/c-ares/c-ares/pull/877)
+* adig: rework command line arguments to mimic dig from bind.
+  [PR #890](https://github.com/c-ares/c-ares/pull/890)
+* Add new method for overriding network functions
+  `ares_set_socket_function_ex()` to properly support all new functionality.
+  [PR #894](https://github.com/c-ares/c-ares/pull/894)
+* Fix regression with custom socket callbacks due to DNS cookie support.
+  [PR #895](https://github.com/c-ares/c-ares/pull/895)
+* ares_socket: set IP_BIND_ADDRESS_NO_PORT on ares_set_local_ip* tcp sockets
+  [PR #887](https://github.com/c-ares/c-ares/pull/887)
+* URI parser/writer for ares_set_servers_csv()/ares_get_servers_csv().
+  [PR #882](https://github.com/c-ares/c-ares/pull/882)
 
 Changes:
+* Connection handling modularization.
+  [PR #857](https://github.com/c-ares/c-ares/pull/857),
+  [PR #876](https://github.com/c-ares/c-ares/pull/876)
+* Expose library/utility functions to tools.
+  [PR #860](https://github.com/c-ares/c-ares/pull/860)
+* Remove `ares__` prefix, just use `ares_` for internal functions.
+  [PR #872](https://github.com/c-ares/c-ares/pull/872)
 
-* tests: when performing simulated queries, reduce timeouts to make tests run
-  faster
-* Replace configuration file parsers with memory-safe parser. [PR #725](https://github.com/c-ares/c-ares/pull/725)
-* Remove `acountry` completely, the manpage might still get installed otherwise. [Issue #718](https://github.com/c-ares/c-ares/pull/718)
 
 Bugfixes:
+* fix: potential WIN32_LEAN_AND_MEAN redefinition.
+  [PR #869](https://github.com/c-ares/c-ares/pull/869)
+* Fix googletest v1.15 compatibility.
+  [PR #874](https://github.com/c-ares/c-ares/pull/874)
+* Fix pkgconfig thread dependencies.
+  [PR #884](https://github.com/c-ares/c-ares/pull/884)
 
-* CMake: don't overwrite global required libraries/definitions/includes which
-  could cause build errors for projects chain building c-ares. [Issue #729](https://github.com/c-ares/c-ares/issues/729)
-* On some platforms, `netinet6/in6.h` is not included by `netinet/in.h`
-  and needs to be included separately. [PR #728](https://github.com/c-ares/c-ares/pull/728)
-* Fix a potential memory leak in `ares_init()`. [Issue #724](https://github.com/c-ares/c-ares/issues/724)
-* Some platforms don't have the `isascii()` function.  Implement as a macro. [PR #721](https://github.com/c-ares/c-ares/pull/721)
-* CMake: Fix Chain building if CMAKE runtime paths not set
-* NDots configuration should allow a value of zero. [PR #735](https://github.com/c-ares/c-ares/pull/735)
 
-Thanks go to these friendly people for their efforts and contributions for this release:
+Thanks go to these friendly people for their efforts and contributions for this
+release:
 
 * Brad House (@bradh352)
 * Cristian Rodríguez (@crrodriguez)
-* Daniel Stenberg (@bagder)
-* Faraz (@farazrbx)
-* Faraz Fallahi (@fffaraz)
-* Oliver Welsh (@oliverwelsh)
+* Georg (@tacerus)
+* @lifenjoiner
+* Shelley Vohr (@codebytere)
+* 前进，前进，进 (@leleliu008)
+

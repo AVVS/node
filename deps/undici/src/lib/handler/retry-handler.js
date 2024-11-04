@@ -3,7 +3,12 @@ const assert = require('node:assert')
 
 const { kRetryHandlerDefaultRetry } = require('../core/symbols')
 const { RequestRetryError } = require('../core/errors')
-const { isDisturbed, parseHeaders, parseRangeHeader } = require('../core/util')
+const {
+  isDisturbed,
+  parseHeaders,
+  parseRangeHeader,
+  wrapRequestBody
+} = require('../core/util')
 
 function calculateRetryAfterHeader (retryAfter) {
   const current = Date.now()
@@ -29,7 +34,7 @@ class RetryHandler {
 
     this.dispatch = handlers.dispatch
     this.handler = handlers.handler
-    this.opts = dispatchOpts
+    this.opts = { ...dispatchOpts, body: wrapRequestBody(opts.body) }
     this.abort = null
     this.aborted = false
     this.retryOpts = {
@@ -174,7 +179,9 @@ class RetryHandler {
         this.abort(
           new RequestRetryError('Request failed', statusCode, {
             headers,
-            count: this.retryCount
+            data: {
+              count: this.retryCount
+            }
           })
         )
         return false
@@ -185,8 +192,18 @@ class RetryHandler {
     if (this.resume != null) {
       this.resume = null
 
-      if (statusCode !== 206) {
-        return true
+      // Only Partial Content 206 supposed to provide Content-Range,
+      // any other status code that partially consumed the payload
+      // should not be retry because it would result in downstream
+      // wrongly concatanete multiple responses.
+      if (statusCode !== 206 && (this.start > 0 || statusCode !== 200)) {
+        this.abort(
+          new RequestRetryError('server does not support the range header and the payload was partially consumed', statusCode, {
+            headers,
+            data: { count: this.retryCount }
+          })
+        )
+        return false
       }
 
       const contentRange = parseRangeHeader(headers['content-range'])
@@ -195,7 +212,7 @@ class RetryHandler {
         this.abort(
           new RequestRetryError('Content-Range mismatch', statusCode, {
             headers,
-            count: this.retryCount
+            data: { count: this.retryCount }
           })
         )
         return false
@@ -206,7 +223,7 @@ class RetryHandler {
         this.abort(
           new RequestRetryError('ETag mismatch', statusCode, {
             headers,
-            count: this.retryCount
+            data: { count: this.retryCount }
           })
         )
         return false
@@ -278,7 +295,7 @@ class RetryHandler {
 
     const err = new RequestRetryError('Request failed', statusCode, {
       headers,
-      count: this.retryCount
+      data: { count: this.retryCount }
     })
 
     this.abort(err)

@@ -65,15 +65,11 @@
         'NODE_PLATFORM="win32"',
         '_UNICODE=1',
       ],
-      'conditions': [
-        ['clang==0', {
-          'msvs_precompiled_header': 'tools/msvs/pch/node_pch.h',
-          'msvs_precompiled_source': 'tools/msvs/pch/node_pch.cc',
-          'sources': [
-            '<(_msvs_precompiled_header)',
-            '<(_msvs_precompiled_source)',
-          ],
-        }],
+      'msvs_precompiled_header': 'tools/msvs/pch/node_pch.h',
+      'msvs_precompiled_source': 'tools/msvs/pch/node_pch.cc',
+      'sources': [
+        '<(_msvs_precompiled_header)',
+        '<(_msvs_precompiled_source)',
       ],
     }, { # POSIX
       'defines': [ '__POSIX__' ],
@@ -220,8 +216,12 @@
       'dependencies': [ 'deps/brotli/brotli.gyp:brotli' ],
     }],
 
+    [ 'node_shared_sqlite=="false"', {
+      'dependencies': [ 'deps/sqlite/sqlite.gyp:sqlite' ],
+    }],
+
     [ 'OS=="mac"', {
-      # linking Corefoundation is needed since certain OSX debugging tools
+      # linking Corefoundation is needed since certain macOS debugging tools
       # like Instruments require it for some features
       'libraries': [ '-framework CoreFoundation' ],
       'defines!': [
@@ -407,6 +407,11 @@
       ]
     }, {
       'defines': [ 'HAVE_OPENSSL=0' ]
+    }],
+    [ 'node_use_amaro=="true"', {
+      'defines': [ 'HAVE_AMARO=1' ],
+    }, {
+      'defines': [ 'HAVE_AMARO=0' ]
     }],
   ],
 }
