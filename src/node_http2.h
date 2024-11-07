@@ -822,7 +822,6 @@ class Http2Session : public AsyncWrap,
   };
 
   Statistics statistics_ = {};
-  AliasedUint8Array outgoing_headers_;
 
  private:
   void EmitStatistics();

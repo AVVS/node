@@ -554,7 +554,6 @@ Http2Session::Http2Session(Http2State* http2_state,
                            Local<Object> wrap,
                            SessionType type)
     : AsyncWrap(http2_state->env(), wrap, AsyncWrap::PROVIDER_HTTP2SESSION),
-      outgoing_headers_(http2_state->env()->isolate(), 1024, nullptr, v8::BackingStoreInitializationMode::kUninitialized),
       js_fields_(http2_state->env()->isolate()),
       session_type_(type),
       http2_state_(http2_state) {
@@ -613,9 +612,6 @@ Http2Session::Http2Session(Http2State* http2_state,
       Uint8Array::New(js_fields_.GetArrayBuffer(), 0, kSessionUint8FieldCount);
 
   USE(wrap->Set(env()->context(), env()->fields_string(), uint8_arr));
-
-  // this is for establishing request sessions
-  USE(wrap->Set(env()->context(), env()->outgoing_headers_string(), outgoing_headers_.GetJSArray()));
 }
 
 Http2Session::~Http2Session() {
@@ -656,7 +652,6 @@ void Http2Session::MemoryInfo(MemoryTracker* tracker) const {
   tracker->TrackField("outstanding_pings", outstanding_pings_);
   tracker->TrackField("outstanding_settings", outstanding_settings_);
   tracker->TrackField("outgoing_buffers", outgoing_buffers_);
-  tracker->TrackFieldWithSize("outgoing_headers", outgoing_headers_.Length());
   tracker->TrackFieldWithSize("stream_buf", stream_buf_.len);
   tracker->TrackFieldWithSize("outgoing_storage", outgoing_storage_.size());
   tracker->TrackFieldWithSize("pending_rst_streams",
@@ -3392,13 +3387,12 @@ void Http2State::IncreaseBuffer(const v8::FunctionCallbackInfo<v8::Value>& args)
   Isolate* isolate = realm->isolate();
 
   size_t size = args[0]->Uint32Value(isolate->GetCurrentContext()).ToChecked();
-  auto increased_buffer = binding_data->UpdateHeadersBuffer(size);
 
   // update references
   binding_data->object()
       ->Set(realm->context(),
             realm->env()->outgoing_headers_string(),
-            increased_buffer)
+            binding_data->UpdateHeadersBuffer(size))
       .Check();
 }
 
