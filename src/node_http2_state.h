@@ -4,6 +4,7 @@
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #include "aliased_buffer.h"
+#include "node_snapshotable.h"
 
 struct nghttp2_rcbuf;
 
@@ -86,10 +87,10 @@ namespace http2 {
     IDX_SESSION_STATS_COUNT
   };
 
-class Http2State : public BaseObject {
+class Http2State : public SnapshotableObject {
  public:
   Http2State(Realm* realm, v8::Local<v8::Object> obj)
-      : BaseObject(realm, obj),
+      : SnapshotableObject(realm, obj, type_int),
         root_buffer(realm->isolate(), sizeof(http2_state_internal)),
         session_state_buffer(
             realm->isolate(),
@@ -117,7 +118,15 @@ class Http2State : public BaseObject {
             realm->isolate(),
             offsetof(http2_state_internal, settings_buffer),
             IDX_SETTINGS_COUNT + 1 + 1 + 2 * MAX_ADDITIONAL_SETTINGS,
-            root_buffer) {}
+            root_buffer),
+        headers_buffer(realm->isolate(), 64 * 1024) {
+    obj
+      ->Set(realm->context(),
+            realm->env()->outgoing_headers_string(),
+            headers_buffer.GetJSArray())
+      .Check();
+    headers_buffer.MakeWeak();
+  }
 
   AliasedUint8Array root_buffer;
   AliasedFloat64Array session_state_buffer;
@@ -126,6 +135,19 @@ class Http2State : public BaseObject {
   AliasedFloat64Array session_stats_buffer;
   AliasedUint32Array options_buffer;
   AliasedUint32Array settings_buffer;
+  AliasedUint8Array headers_buffer;
+
+  using InternalFieldInfo = InternalFieldInfoBase;
+
+  SERIALIZABLE_OBJECT_METHODS()
+
+  static void IncreaseBuffer(const v8::FunctionCallbackInfo<v8::Value>& args);
+
+  static void CreatePerContextProperties(v8::Local<v8::Object> target,
+                                         v8::Local<v8::Value> unused,
+                                         v8::Local<v8::Context> context,
+                                         void* priv);
+  static void RegisterExternalReferences(ExternalReferenceRegistry* registry);
 
   void MemoryInfo(MemoryTracker* tracker) const override;
   SET_SELF_SIZE(Http2State)
@@ -148,6 +170,8 @@ class Http2State : public BaseObject {
     uint32_t settings_buffer[IDX_SETTINGS_COUNT + 1 + 1 +
                              2 * MAX_ADDITIONAL_SETTINGS];
   };
+
+  v8::Local<v8::Uint8Array> UpdateHeadersBuffer(const size_t capacity);
 };
 
 }  // namespace http2

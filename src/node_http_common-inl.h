@@ -6,9 +6,12 @@
 #include "node_mem-inl.h"
 #include "env-inl.h"
 #include "v8.h"
+#include "ada.h"
 
 #include <algorithm>
 #include "nbytes.h"
+#include <nghttp2/nghttp2.h>
+#include <unordered_set>
 
 namespace node {
 
@@ -64,6 +67,119 @@ NgHeaders<T>::NgHeaders(Environment* env, v8::Local<v8::Array> headers) {
     p += nva[n].valuelen + 1;
     nva[n].flags = *p;
     p++;
+  }
+}
+
+static constexpr nghttp2_nv_flag HTTP2_NO_FLAG = static_cast<nghttp2_nv_flag>(NGHTTP2_FLAG_NONE);
+static constexpr nghttp2_nv_flag HTTP2_NO_INDEX_FLAG = static_cast<nghttp2_nv_flag>(NGHTTP2_NV_FLAG_NO_INDEX);
+
+template <typename T>
+NgHeaders<T>::NgHeaders(const uint8_t* data) {
+  // Buffer is formatted in this way:
+  // 16 bytes "header"
+  // | 4 bytes - header count | 4 bytes - header string length |
+  // | 4 bytes - pseudo header count | 4 bytes - number of never index headers |
+  // rest is header contents structure in this way:
+  // {name}\0{value}\0{value}\0\0
+  // char[]\0char[]\0char[0]\0\0
+  // each name has at least 1 value, double \0 indicates new name
+  // if number of never index headers is > 0
+  // then following main headers
+
+  auto base = reinterpret_cast<char*>(const_cast<uint8_t*>(data));
+  auto int_view = reinterpret_cast<uint32_t*>(base);
+
+  count_ = int_view[0];
+  if (count_ == 0) {
+    return;
+  }
+
+  auto headers_source = base + 16;
+  auto header_string_len = int_view[1];
+  auto pseudo_headers_count = int_view[2];
+  auto never_index_count = int_view[3];
+
+  buf_.AllocateSufficientStorage((alignof(nv_t) - 1) +
+                                 count_ * sizeof(nv_t) +
+                                 header_string_len);
+
+  char* p_start = nbytes::AlignUp(buf_.out(), alignof(nv_t));
+  char* r_start = p_start + (pseudo_headers_count * sizeof(nv_t));
+
+  // write pseudo headers block to nva_psa
+  // write regular to nva_reg
+  nv_t* const nva_ps = reinterpret_cast<nv_t*>(p_start);
+  nv_t* const nva_reg = reinterpret_cast<nv_t*>(r_start);
+
+  // capture contents of name/value pairs so that we can reuse original preallocated pool
+  // memcpy(header_contents, headers_source, header_string_len);
+
+  // pointer to what we are reading from continious memory
+  char* p;
+  size_t r;
+  size_t n;
+
+  // prepare sensitive headers
+  std::unordered_set<std::string_view> never_index_set{};
+  never_index_set.reserve(never_index_count);
+  for (r = 0, n = 0, p = headers_source + header_string_len; r < never_index_count; r += 1) {
+    auto len = strlen(p);
+    ada::idna::ascii_map(p, len); // lowercase
+    never_index_set.insert(std::string_view{p, len}); // insert into lookup index
+    p += len + 1; // move pointer to next header name
+  }
+
+  for (p = headers_source, r = 0, n = 0; p < headers_source + header_string_len; ) {
+    bool is_pseudo = pseudo_headers_count > n && p[0] == ':';
+
+    // this has been verified before
+    if (is_pseudo) {
+      nva_ps[n].name = reinterpret_cast<uint8_t*>(p);
+      nva_ps[n].namelen = strlen(p);
+      ada::idna::ascii_map(p, nva_ps[n].namelen); // lowercase in-place as we didn't do it earlier
+
+      // set the flag
+      nva_ps[n].flags = never_index_set.contains(std::string_view {p, nva_ps[n].namelen})
+        ? HTTP2_NO_INDEX_FLAG
+        : HTTP2_NO_FLAG;
+
+      p += nva_ps[n].namelen + 1;
+
+      nva_ps[n].value = reinterpret_cast<uint8_t*>(p);
+      nva_ps[n].valuelen = strlen(p);
+      p += nva_ps[n].valuelen + 1;
+
+
+      // go over next 2 \0 because all pseudo headers have only 1 allowed value
+      p++;
+      n++;
+    } else {
+      auto current_name = reinterpret_cast<uint8_t*>(p);
+      size_t name_len = strlen(p);
+      ada::idna::ascii_map(p, name_len); // lowercase in-place as we didn't do it earlier
+      p += name_len + 1;
+
+      auto flag = never_index_set.contains(std::string_view {reinterpret_cast<char*>(current_name), name_len})
+        ? HTTP2_NO_INDEX_FLAG
+        : HTTP2_NO_FLAG;
+
+      while (*p != '\0') {
+        nva_reg[r].name = current_name;
+        nva_reg[r].namelen = name_len;
+
+        // set flag
+        nva_reg[r].flags = flag;
+
+        nva_reg[r].value = reinterpret_cast<uint8_t*>(p);
+        nva_reg[r].valuelen = strlen(p);
+
+        // move pointer to next value
+        p += nva_reg[r].valuelen + 1;
+        r++;
+      }
+
+      p++;
+    }
   }
 }
 

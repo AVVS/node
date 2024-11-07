@@ -16,12 +16,19 @@
 #include "node_perf.h"
 #include "stream_base.h"
 #include "string_bytes.h"
+#include "v8-fast-api-calls.h"
 
 #include <algorithm>
 #include <queue>
 
 namespace node {
+
+class ExternalReferenceRegistry;
 namespace http2 {
+
+using v8::Local;
+using v8::Value;
+using v8::Object;
 
 // Constants in all caps are exported as user-facing constants
 // in JavaScript. Constants using the kName pattern are internal
@@ -245,9 +252,9 @@ class Http2Options {
 
 struct Http2Priority : public nghttp2_priority_spec {
   Http2Priority(Environment* env,
-                v8::Local<v8::Value> parent,
-                v8::Local<v8::Value> weight,
-                v8::Local<v8::Value> exclusive);
+                Local<Value> parent,
+                Local<Value> weight,
+                Local<Value> exclusive);
 };
 
 class Http2StreamListener : public StreamListener {
@@ -270,6 +277,15 @@ using Http2Header = NgHeader<Http2HeaderTraits>;
 class Http2Stream : public AsyncWrap,
                     public StreamBase {
  public:
+  // The kSlot field here mirrors that of BaseObject::InternalFields::kSlot
+  // because instances deriving from StreamBase generally also derived from
+  // BaseObject (it's possible for it not to, however).
+  enum InternalFields {
+    kSlot = BaseObject::kSlot,
+    kImplField = StreamBase::kInternalFieldCount,
+    kInternalFieldCount
+  };
+
   static Http2Stream* New(
       Http2Session* session,
       int32_t id,
@@ -319,7 +335,6 @@ class Http2Stream : public AsyncWrap,
       const Http2Headers& headers,
       int32_t* ret,
       int options = 0);
-
 
   void Close(int32_t code);
 
@@ -440,16 +455,36 @@ class Http2Stream : public AsyncWrap,
 
   std::string diagnostic_name() const override;
 
+  // Init API
+  static void RegisterExternalReferences(ExternalReferenceRegistry *registry);
+  static void AddMethods(v8::Isolate* isolate,
+                         v8::Local<v8::FunctionTemplate> target);
+
   // JavaScript API
-  static void GetID(const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void Destroy(const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void Priority(const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void PushPromise(const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void RefreshState(const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void Info(const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void Trailers(const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void Respond(const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void RstStream(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void Destroy(const v8::FunctionCallbackInfo<Value>& args);
+  static void Priority(const v8::FunctionCallbackInfo<Value>& args);
+  static void PushPromise(const v8::FunctionCallbackInfo<Value>& args);
+  static void RefreshState(const v8::FunctionCallbackInfo<Value>& args);
+  static void Info(const v8::FunctionCallbackInfo<Value>& args);
+  static void RstStream(const v8::FunctionCallbackInfo<Value>& args);
+
+  // Slow API
+  static void GetID(const v8::FunctionCallbackInfo<Value>& args);
+  static void Trailers(const v8::FunctionCallbackInfo<Value>& args);
+  static void Respond(const v8::FunctionCallbackInfo<Value>& args);
+
+  // Fast JavaScript API
+  static int32_t FastRespond(Local<Value> unused, Local<Value> receiver, const int32_t options);
+  static int32_t FastTrailers(Local<Value> unused, Local<Value> receiver);
+  static int32_t FastGetID(Local<Value> unused, Local<Value> receiver);
+
+  // fast api references for JS API
+  static v8::CFunction fast_respond_;
+  static v8::CFunction fast_trailers_;
+  static v8::CFunction fast_get_id_;
+
+  // get type checked embedder
+  static inline Http2Stream* FromObject(Local<Object> value);
 
   class Provider;
 
@@ -476,6 +511,8 @@ class Http2Stream : public AsyncWrap,
   void EmitStatistics();
 
   BaseObjectWeakPtr<Http2Session> session_;     // The Parent HTTP/2 Session
+  BaseObjectWeakPtr<Http2State> http2_state_;
+
   int32_t id_ = 0;                              // The Stream Identifier
   int32_t code_ = NGHTTP2_NO_ERROR;             // The RST_STREAM code (if any)
   int flags_ = kStreamStateNone;        // Internal state flags
@@ -512,14 +549,14 @@ class Http2Stream::Provider {
   explicit Provider(int options);
   virtual ~Provider();
 
-  nghttp2_data_provider* operator*() {
+  nghttp2_data_provider2* operator*() {
     return !empty_ ? &provider_ : nullptr;
   }
 
   class FD;
   class Stream;
  protected:
-  nghttp2_data_provider provider_;
+  nghttp2_data_provider2 provider_;
 
  private:
   bool empty_ = false;
@@ -723,6 +760,7 @@ class Http2Session : public AsyncWrap,
   static void Ping(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void AltSvc(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Origin(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void IncreaseBuffer(const v8::FunctionCallbackInfo<v8::Value>& args);
 
   template <get_setting fn, bool local>
   static void RefreshSettings(const v8::FunctionCallbackInfo<v8::Value>& args);

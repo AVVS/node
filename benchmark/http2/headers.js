@@ -3,11 +3,13 @@
 const common = require('../common.js');
 
 const bench = common.createBenchmark(main, {
-  n: [1e3],
-  nheaders: [0, 10, 100, 1000],
+  nheaders: [0, 10, 100],
+  n: [50000, 100000],
+  parallel: [10],
 }, { flags: ['--no-warnings'] });
 
-function main({ n, nheaders }) {
+function main({ parallel, nheaders, n }) {
+
   const http2 = require('http2');
   const server = http2.createServer({
     maxHeaderListPairs: 20000,
@@ -32,17 +34,31 @@ function main({ n, nheaders }) {
     stream.end('Hi!');
   });
   server.listen(0, () => {
+    // bench.http({
+    //   path: '/',
+    //   port: server.address().port,
+    //   requests,
+    //   maxConcurrentStreams: streams,
+    //   clients,
+    //   headers: headersObject,
+    //   duration,
+    //   threads: clients,
+    // }, () => { server.close(); });
+
     const client = http2.connect(`http://localhost:${server.address().port}/`, {
       maxHeaderListPairs: 20000,
     });
 
+    let inflight = 0;
     function doRequest(remaining) {
+      inflight += 1;
       const req = client.request(headersObject);
       req.resume();
       req.on('end', () => {
+        inflight -= 1;
         if (remaining > 0) {
           doRequest(remaining - 1);
-        } else {
+        } else if (inflight === 0) {
           bench.end(n);
           server.close();
           client.destroy();
@@ -51,6 +67,12 @@ function main({ n, nheaders }) {
     }
 
     bench.start();
-    doRequest(n);
+
+    // parallel requests
+    let i = parallel;
+    const total = n / i;
+    while (i-- > 0) {
+      doRequest(total);
+    }
   });
 }

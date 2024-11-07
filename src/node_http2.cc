@@ -12,7 +12,7 @@
 #include "node_revert.h"
 #include "stream_base-inl.h"
 #include "util-inl.h"
-
+#include "node_debug.h"
 #include "nbytes.h"
 
 #include <algorithm>
@@ -52,6 +52,7 @@ namespace http2 {
 namespace {
 
 const char zero_bytes_256[256] = {};
+
 
 bool HasHttp2Observer(Environment* env) {
   AliasedUint32Array& observers = env->performance_state()->observers;
@@ -609,6 +610,7 @@ Http2Session::Http2Session(Http2State* http2_state,
 
   Local<Uint8Array> uint8_arr =
       Uint8Array::New(js_fields_.GetArrayBuffer(), 0, kSessionUint8FieldCount);
+
   USE(wrap->Set(env()->context(), env()->fields_string(), uint8_arr));
 }
 
@@ -1314,11 +1316,7 @@ int Http2Session::OnDataChunkReceived(nghttp2_session* handle,
     } else {
       memcpy(buf.base, data, avail);
     }
-    if (buf.base == nullptr) [[likely]] {
-      buf.base = reinterpret_cast<char*>(const_cast<uint8_t*>(data));
-    } else {
-      memcpy(buf.base, data, avail);
-    }
+
     data += avail;
     len -= avail;
     stream->EmitRead(avail, buf);
@@ -2011,7 +2009,7 @@ Http2Stream* Http2Session::SubmitRequest(
   Http2Scope h2scope(this);
   Http2Stream* stream = nullptr;
   Http2Stream::Provider::Stream prov(options);
-  *ret = nghttp2_submit_request(
+  *ret = nghttp2_submit_request2(
       session_.get(),
       &priority,
       headers.data(),
@@ -2020,6 +2018,7 @@ Http2Stream* Http2Session::SubmitRequest(
       nullptr);
   CHECK_NE(*ret, NGHTTP2_ERR_NOMEM);
   if (*ret > 0) [[likely]] {
+    // fprintf(stderr, "Http2Stream::New\n");
     stream = Http2Stream::New(this, *ret, NGHTTP2_HCAT_HEADERS, options);
   }
   return stream;
@@ -2160,6 +2159,8 @@ Http2Stream* Http2Stream::New(Http2Session* session,
            .ToLocal(&obj)) {
     return nullptr;
   }
+
+  // fprintf(stderr, "internal field count %d\n", obj->InternalFieldCount());
   return new Http2Stream(session, obj, id, category, options);
 }
 
@@ -2171,10 +2172,12 @@ Http2Stream::Http2Stream(Http2Session* session,
     : AsyncWrap(session->env(), obj, AsyncWrap::PROVIDER_HTTP2STREAM),
       StreamBase(session->env()),
       session_(session),
+      http2_state_(session->http2_state()),
       id_(id),
       current_headers_category_(category) {
   MakeWeak();
   StreamBase::AttachToObject(GetObject());
+  GetObject()->SetAlignedPointerInInternalField(Http2Stream::kImplField, this);
   statistics_.id = id;
   statistics_.start_time = uv_hrtime();
 
@@ -2327,7 +2330,7 @@ int Http2Stream::SubmitResponse(const Http2Headers& headers, int options) {
     options |= STREAM_OPTION_EMPTY_PAYLOAD;
 
   Http2Stream::Provider::Stream prov(this, options);
-  int ret = nghttp2_submit_response(
+  int ret = nghttp2_submit_response2(
       session_->session(),
       id_,
       headers.data(),
@@ -2377,7 +2380,7 @@ int Http2Stream::SubmitTrailers(const Http2Headers& headers) {
   // to indicate that the stream is ready to be closed.
   if (headers.length() == 0) {
     Http2Stream::Provider::Stream prov(this, 0);
-    ret = nghttp2_submit_data(
+    ret = nghttp2_submit_data2(
         session_->session(),
         NGHTTP2_FLAG_END_STREAM,
         id_,
@@ -2537,11 +2540,11 @@ int Http2Stream::DoWrite(WriteWrap* req_wrap,
   for (size_t i = 0; i < nbufs; ++i) {
     // Store the req_wrap on the last write info in the queue, so that it is
     // only marked as finished once all buffers associated with it are finished.
-    queue_.emplace(NgHttp2StreamWrite {
+    queue_.emplace(
       BaseObjectPtr<AsyncWrap>(
           i == nbufs - 1 ? req_wrap->GetAsyncWrap() : nullptr),
       bufs[i]
-    });
+    );
     IncrementAvailableOutboundLength(bufs[i].len);
   }
   CHECK_NE(nghttp2_session_resume_data(
@@ -2834,16 +2837,15 @@ void Http2Session::Request(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&session, args.This());
   Environment* env = session->env();
 
-  Local<Array> headers = args[0].As<Array>();
-  int32_t options = args[1]->Int32Value(env->context()).ToChecked();
+  int32_t options = args[0]->Int32Value(env->context()).ToChecked();
 
   Debug(session, "request submitted");
 
   int32_t ret = 0;
   Http2Stream* stream =
       session->Http2Session::SubmitRequest(
-          Http2Priority(env, args[2], args[3], args[4]),
-          Http2Headers(env, headers),
+          Http2Priority(env, args[1], args[2], args[3]),
+          Http2Headers(session->http2_state()->headers_buffer.GetNativeBuffer()),
           &ret,
           static_cast<int>(options));
 
@@ -2913,14 +2915,23 @@ void Http2Session::UpdateChunksSent(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(length);
 }
 
+// class Http2Stream Methods
+Http2Stream* Http2Stream::FromObject(Local<Object> obj) {
+  if (obj->GetAlignedPointerFromInternalField(StreamBase::kSlot) == nullptr)
+    return nullptr;
+
+  return static_cast<Http2Stream*>(obj->GetAlignedPointerFromInternalField(Http2Stream::kImplField));
+}
+
 // Submits an RST_STREAM frame effectively closing the Http2Stream. Note that
 // this *WILL* alter the state of the stream, causing the OnStreamClose
 // callback to the triggered.
 void Http2Stream::RstStream(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   Local<Context> context = env->context();
-  Http2Stream* stream;
-  ASSIGN_OR_RETURN_UNWRAP(&stream, args.This());
+
+  auto stream = Http2Stream::FromObject(args.This());
+
   uint32_t code = args[0]->Uint32Value(context).ToChecked();
   Debug(stream, "sending rst_stream with code %d", code);
   stream->SubmitRstStream(code);
@@ -2930,48 +2941,74 @@ void Http2Stream::RstStream(const FunctionCallbackInfo<Value>& args) {
 // outbound DATA frames.
 void Http2Stream::Respond(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
-  Http2Stream* stream;
-  ASSIGN_OR_RETURN_UNWRAP(&stream, args.This());
+  Http2Stream* stream = Http2Stream::FromObject(args[0].As<Object>());
 
-  Local<Array> headers = args[0].As<Array>();
+  // Local<Array> headers = args[0].As<Array>();
   int32_t options = args[1]->Int32Value(env->context()).ToChecked();
 
   args.GetReturnValue().Set(
       stream->SubmitResponse(
-          Http2Headers(env, headers),
+          Http2Headers(stream->http2_state_->headers_buffer.GetNativeBuffer()),
           static_cast<int>(options)));
+
   Debug(stream, "response submitted");
 }
 
+int32_t Http2Stream::FastRespond(Local<Value> unused,
+                                 Local<Value> receiver,
+                                 const int32_t options) {
+
+  TRACK_V8_FAST_API_CALL("http2.respond");
+
+  auto stream = Http2Stream::FromObject(receiver.As<Object>());
+
+  int32_t ret = stream->SubmitResponse(
+    Http2Headers(stream->http2_state_->headers_buffer.GetNativeBuffer()),
+    static_cast<int>(options));
+
+  return ret;
+}
 
 // Submits informational headers on the Http2Stream
 void Http2Stream::Info(const FunctionCallbackInfo<Value>& args) {
-  Environment* env = Environment::GetCurrent(args);
   Http2Stream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.This());
 
-  Local<Array> headers = args[0].As<Array>();
-
-  args.GetReturnValue().Set(stream->SubmitInfo(Http2Headers(env, headers)));
+  args.GetReturnValue().Set(stream->SubmitInfo(
+    Http2Headers(stream->http2_state_->headers_buffer.GetNativeBuffer()))
+  );
 }
 
 // Submits trailing headers on the Http2Stream
 void Http2Stream::Trailers(const FunctionCallbackInfo<Value>& args) {
-  Environment* env = Environment::GetCurrent(args);
-  Http2Stream* stream;
-  ASSIGN_OR_RETURN_UNWRAP(&stream, args.This());
+  auto stream = Http2Stream::FromObject(args[0].As<Object>());
+  args.GetReturnValue().Set(stream->SubmitTrailers(
+    Http2Headers(stream->http2_state_->headers_buffer.GetNativeBuffer())
+  ));
+}
 
-  Local<Array> headers = args[0].As<Array>();
+int32_t Http2Stream::FastTrailers(Local<Value> unused, Local<Value> receiver) {
+  TRACK_V8_FAST_API_CALL("http2.trailers");
 
-  args.GetReturnValue().Set(
-      stream->SubmitTrailers(Http2Headers(env, headers)));
+  auto stream = Http2Stream::FromObject(receiver.As<Object>());
+  auto ret = stream->SubmitTrailers(
+    Http2Headers(stream->http2_state_->headers_buffer.GetNativeBuffer())
+  );
+
+  return ret;
 }
 
 // Grab the numeric id of the Http2Stream
 void Http2Stream::GetID(const FunctionCallbackInfo<Value>& args) {
-  Http2Stream* stream;
-  ASSIGN_OR_RETURN_UNWRAP(&stream, args.This());
+  auto stream = Http2Stream::FromObject(args[0].As<Object>());
   args.GetReturnValue().Set(stream->id());
+}
+
+int32_t Http2Stream::FastGetID(Local<Value> unused, Local<Value> receiver) {
+  TRACK_V8_FAST_API_CALL("http2.get-id");
+
+  auto stream = Http2Stream::FromObject(receiver.As<Object>());
+  return stream->id();
 }
 
 // Destroy the Http2Stream, rendering it no longer usable
@@ -2988,15 +3025,14 @@ void Http2Stream::PushPromise(const FunctionCallbackInfo<Value>& args) {
   Http2Stream* parent;
   ASSIGN_OR_RETURN_UNWRAP(&parent, args.This());
 
-  Local<Array> headers = args[0].As<Array>();
-  int32_t options = args[1]->Int32Value(env->context()).ToChecked();
+  int32_t options = args[0]->Int32Value(env->context()).ToChecked();
 
   Debug(parent, "creating push promise");
 
   int32_t ret = 0;
   Http2Stream* stream =
       parent->SubmitPushPromise(
-          Http2Headers(env, headers),
+          Http2Headers(parent->session()->http2_state()->headers_buffer.GetNativeBuffer()),
           &ret,
           static_cast<int>(options));
 
@@ -3314,17 +3350,93 @@ void NgHttp2Debug(const char* format, va_list args) {
 
 void Http2State::MemoryInfo(MemoryTracker* tracker) const {
   tracker->TrackField("root_buffer", root_buffer);
+  tracker->TrackField("headers_buffer", headers_buffer);
+}
+
+bool Http2State::PrepareForSerialization(v8::Local<v8::Context> context,
+                                         v8::SnapshotCreator* creator) {
+  // We'll just re-initialize the buffers in the constructor since their
+  // contents can be thrown away once consumed in the previous call.
+  headers_buffer.Release();
+  // Return true because we need to maintain the reference to the binding from
+  // JS land.
+  return true;
+}
+
+InternalFieldInfoBase* Http2State::Serialize(int index) {
+  DCHECK_IS_SNAPSHOT_SLOT(index);
+  InternalFieldInfo* info =
+      InternalFieldInfoBase::New<InternalFieldInfo>(type());
+  return info;
+}
+
+void Http2State::Deserialize(v8::Local<v8::Context> context,
+                              v8::Local<v8::Object> holder,
+                              int index,
+                              InternalFieldInfoBase* info) {
+  DCHECK_IS_SNAPSHOT_SLOT(index);
+  v8::HandleScope scope(context->GetIsolate());
+  Realm* realm = Realm::GetCurrent(context);
+  Http2State* binding = realm->AddBindingData<Http2State>(holder);
+  CHECK_NOT_NULL(binding);
+}
+
+void Http2State::IncreaseBuffer(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  Realm* realm = Realm::GetCurrent(args);
+  Http2State* binding_data = realm->GetBindingData<Http2State>();
+  Isolate* isolate = realm->isolate();
+
+  size_t size = args[0]->Uint32Value(isolate->GetCurrentContext()).ToChecked();
+
+  // update references
+  binding_data->object()
+      ->Set(realm->context(),
+            realm->env()->outgoing_headers_string(),
+            binding_data->UpdateHeadersBuffer(size))
+      .Check();
+}
+
+v8::Local<v8::Uint8Array> Http2State::UpdateHeadersBuffer(const size_t capacity) {
+  headers_buffer.reserve(capacity);
+  return headers_buffer.GetJSArray();
+}
+
+// Fast API Calls
+
+v8::CFunction Http2Stream::fast_respond_(
+    v8::CFunction::Make(&Http2Stream::FastRespond));
+v8::CFunction Http2Stream::fast_trailers_(
+    v8::CFunction::Make(&Http2Stream::FastTrailers));
+v8::CFunction Http2Stream::fast_get_id_(
+    v8::CFunction::Make(&Http2Stream::FastGetID));
+
+void Http2Stream::RegisterExternalReferences(ExternalReferenceRegistry *registry) {
+  registry->Register(Respond);
+  registry->Register(FastRespond);
+  registry->Register(fast_respond_.GetTypeInfo());
+
+  registry->Register(Trailers);
+  registry->Register(FastTrailers);
+  registry->Register(fast_trailers_.GetTypeInfo());
+
+  registry->Register(GetID);
+  registry->Register(FastGetID);
+  registry->Register(fast_get_id_.GetTypeInfo());
 }
 
 // Set up the process.binding('http2') binding.
-void Initialize(Local<Object> target,
-                Local<Value> unused,
-                Local<Context> context,
-                void* priv) {
+void Http2State::CreatePerContextProperties(Local<Object> target,
+                                            Local<Value> unused,
+                                            Local<Context> context,
+                                            void* priv) {
   Realm* realm = Realm::GetCurrent(context);
   Environment* env = realm->env();
   Isolate* isolate = env->isolate();
   HandleScope handle_scope(isolate);
+
+  SetFastMethod(context, target, "respondStatic", Http2Stream::Respond, &Http2Stream::fast_respond_);
+  SetFastMethod(context, target, "trailersStatic", Http2Stream::Trailers, &Http2Stream::fast_trailers_);
+  SetFastMethod(context, target, "idStatic", Http2Stream::GetID, &Http2Stream::fast_get_id_);
 
   Http2State* const state = realm->AddBindingData<Http2State>(target);
   if (state == nullptr) return;
@@ -3367,37 +3479,39 @@ void Initialize(Local<Object> target,
   SetMethod(context, target, "refreshDefaultSettings", RefreshDefaultSettings);
   SetMethod(context, target, "packSettings", PackSettings);
   SetMethod(context, target, "setCallbackFunctions", SetCallbackFunctions);
+  SetMethod(context, target, "increaseBuffer", IncreaseBuffer);
 
-  Local<FunctionTemplate> ping = FunctionTemplate::New(env->isolate());
-  ping->SetClassName(FIXED_ONE_BYTE_STRING(env->isolate(), "Http2Ping"));
+// Http2Ping
+  Local<FunctionTemplate> ping = FunctionTemplate::New(isolate);
+  ping->SetClassName(FIXED_ONE_BYTE_STRING(isolate, "Http2Ping"));
   ping->Inherit(AsyncWrap::GetConstructorTemplate(env));
   Local<ObjectTemplate> pingt = ping->InstanceTemplate();
   pingt->SetInternalFieldCount(Http2Ping::kInternalFieldCount);
   env->set_http2ping_constructor_template(pingt);
 
-  Local<FunctionTemplate> setting = FunctionTemplate::New(env->isolate());
+  // Http2Settings
+  Local<FunctionTemplate> setting = FunctionTemplate::New(isolate);
   setting->Inherit(AsyncWrap::GetConstructorTemplate(env));
   Local<ObjectTemplate> settingt = setting->InstanceTemplate();
   settingt->SetInternalFieldCount(AsyncWrap::kInternalFieldCount);
   env->set_http2settings_constructor_template(settingt);
 
-  Local<FunctionTemplate> stream = FunctionTemplate::New(env->isolate());
-  SetProtoMethod(isolate, stream, "id", Http2Stream::GetID);
+  // Http2Stream
+  Local<FunctionTemplate> stream = FunctionTemplate::New(isolate);
   SetProtoMethod(isolate, stream, "destroy", Http2Stream::Destroy);
   SetProtoMethod(isolate, stream, "priority", Http2Stream::Priority);
   SetProtoMethod(isolate, stream, "pushPromise", Http2Stream::PushPromise);
   SetProtoMethod(isolate, stream, "info", Http2Stream::Info);
-  SetProtoMethod(isolate, stream, "trailers", Http2Stream::Trailers);
-  SetProtoMethod(isolate, stream, "respond", Http2Stream::Respond);
   SetProtoMethod(isolate, stream, "rstStream", Http2Stream::RstStream);
   SetProtoMethod(isolate, stream, "refreshState", Http2Stream::RefreshState);
   stream->Inherit(AsyncWrap::GetConstructorTemplate(env));
   StreamBase::AddMethods(env, stream);
   Local<ObjectTemplate> streamt = stream->InstanceTemplate();
-  streamt->SetInternalFieldCount(StreamBase::kInternalFieldCount);
+  streamt->SetInternalFieldCount(Http2Stream::kInternalFieldCount);
   env->set_http2stream_constructor_template(streamt);
   SetConstructorFunction(context, target, "Http2Stream", stream);
 
+  // Http2Session
   Local<FunctionTemplate> session =
       NewFunctionTemplate(isolate, Http2Session::New);
   session->InstanceTemplate()->SetInternalFieldCount(
@@ -3432,6 +3546,7 @@ void Initialize(Local<Object> target,
                                     false>);
   SetConstructorFunction(context, target, "Http2Session", session);
 
+  // Constants to be exported
   Local<Object> constants = Object::New(isolate);
 
   // This does allocate one more slot than needed but it's not used.
@@ -3484,7 +3599,15 @@ void Initialize(Local<Object> target,
   nghttp2_set_debug_vprintf_callback(NgHttp2Debug);
 #endif
 }
+
+void Http2State::RegisterExternalReferences(ExternalReferenceRegistry* registry) {
+  Http2Stream::RegisterExternalReferences(registry);
+}
+
 }  // namespace http2
 }  // namespace node
 
-NODE_BINDING_CONTEXT_AWARE_INTERNAL(http2, node::http2::Initialize)
+NODE_BINDING_CONTEXT_AWARE_INTERNAL(
+    http2, node::http2::Http2State::CreatePerContextProperties)
+NODE_BINDING_EXTERNAL_REFERENCE(
+    http2, node::http2::Http2State::RegisterExternalReferences)

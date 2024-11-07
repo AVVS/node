@@ -55,6 +55,15 @@ using CFunctionCallbackWithUint8ArrayUint32Int64Bool =
                 bool);
 using CFunctionWithUint32 = uint32_t (*)(v8::Local<v8::Value>,
                                          const uint32_t input);
+
+using CFunctionReturnInt32 = int32_t (*)(v8::Local<v8::Object> unused);
+using CFunctionScopedReturnInt32 = int32_t (*)(v8::Local<v8::Value> unused,
+                                               v8::Local<v8::Value> receiver);
+
+using CFunctionScopedWithInt32ReturnInt32 = int32_t (*)(v8::Local<v8::Value> unused,
+                                                        v8::Local<v8::Value> receiver,
+                                                        const int32_t options);
+
 using CFunctionWithDoubleReturnDouble = double (*)(v8::Local<v8::Value>,
                                                    v8::Local<v8::Value>,
                                                    const double);
@@ -105,6 +114,9 @@ class ExternalReferenceRegistry {
   V(CFunctionWithDoubleReturnDouble)                                           \
   V(CFunctionWithInt64Fallback)                                                \
   V(CFunctionWithBool)                                                         \
+  V(CFunctionReturnInt32)                                                      \
+  V(CFunctionScopedReturnInt32)                                                \
+  V(CFunctionScopedWithInt32ReturnInt32)                                       \
   V(CFunctionBufferCopy)                                                       \
   V(CFunctionWriteString)                                                      \
   V(const v8::CFunctionInfo*)                                                  \
@@ -180,6 +192,7 @@ class ExternalReferenceRegistry {
   V(tty_wrap)                                                                  \
   V(udp_wrap)                                                                  \
   V(url)                                                                       \
+  V(http2)                                                                     \
   V(util)                                                                      \
   V(pipe_wrap)                                                                 \
   V(sea)                                                                       \
