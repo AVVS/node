@@ -56,7 +56,7 @@
     "path": "interfaces"
   },
   "performance-timeline": {
-    "commit": "17ebc3aea0d6321e69554067c39ab5855e6fb67e",
+    "commit": "94caab7038b27c16d605fa3547dacbee3a2fde4e",
     "path": "performance-timeline"
   },
   "resource-timing": {
@@ -88,7 +88,7 @@
     "path": "wasm/webapi"
   },
   "WebCryptoAPI": {
-    "commit": "75db68b05454e7f3a81e063373defd094c176a16",
+    "commit": "5f0f4ac1af4848480406621fac99163c8ba0e242",
     "path": "WebCryptoAPI"
   },
   "webidl/ecmascript-binding/es-exceptions": {
