@@ -35,7 +35,8 @@ class AliasedBufferBase : public MemoryRetainer {
 
   AliasedBufferBase(v8::Isolate* isolate,
                     const size_t count,
-                    const AliasedBufferIndex* index = nullptr);
+                    const AliasedBufferIndex* index = nullptr,
+                    const v8::BackingStoreInitializationMode initialization_mode = v8::BackingStoreInitializationMode::kZeroInitialized);
 
   /**
    * Create an AliasedBufferBase over a sub-region of another aliased buffer.

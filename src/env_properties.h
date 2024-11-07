@@ -157,6 +157,7 @@
   V(fatal_exception_string, "_fatalException")                                 \
   V(fd_string, "fd")                                                           \
   V(fields_string, "fields")                                                   \
+  V(outgoing_headers_string, "outgoingHeaders")                               \
   V(file_string, "file")                                                       \
   V(filename_string, "filename")                                               \
   V(fingerprint256_string, "fingerprint256")                                   \

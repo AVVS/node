@@ -252,6 +252,7 @@ class NgHeaders {
  public:
   typedef typename T::nv_t nv_t;
   inline NgHeaders(Environment* env, v8::Local<v8::Array> headers);
+  inline NgHeaders(const uint8_t* data);
   ~NgHeaders() = default;
 
   const nv_t* operator*() const {

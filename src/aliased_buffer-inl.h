@@ -13,8 +13,9 @@ typedef size_t AliasedBufferIndex;
 
 template <typename NativeT, typename V8T>
 AliasedBufferBase<NativeT, V8T>::AliasedBufferBase(
-    v8::Isolate* isolate, const size_t count, const AliasedBufferIndex* index)
-    : isolate_(isolate), count_(count), byte_offset_(0), index_(index) {
+    v8::Isolate* isolate, const size_t count, const AliasedBufferIndex* index,
+    v8::BackingStoreInitializationMode initialization_mode)
+    : isolate_(isolate), count_(count), index_(index) {
   CHECK_GT(count, 0);
   if (index != nullptr) {
     // Will be deserialized later.
@@ -25,7 +26,7 @@ AliasedBufferBase<NativeT, V8T>::AliasedBufferBase(
       MultiplyWithOverflowCheck(sizeof(NativeT), count);
 
   // allocate v8 ArrayBuffer
-  v8::Local<v8::ArrayBuffer> ab = v8::ArrayBuffer::New(isolate_, size_in_bytes);
+  v8::Local<v8::ArrayBuffer> ab = v8::ArrayBuffer::New(isolate_, size_in_bytes, initialization_mode);
   buffer_ = static_cast<NativeT*>(ab->Data());
 
   // allocate v8 TypedArray
