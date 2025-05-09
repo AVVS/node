@@ -34,6 +34,7 @@ const { duplexPair } = require('stream');
   req.on('response', common.mustCall((headers) => {
     assert.strictEqual(headers[':status'], 200);
     assert.strictEqual(headers.cookie, 'donotindex');
+
     assert.deepStrictEqual(headers[http2.sensitiveHeaders],
                            ['cookie', 'sensitive']);
   }));

@@ -1160,6 +1160,25 @@ uint32_t TranslateNghttp2ErrorCode(const int libErrorCode) {
   }
 }
 
+// This function is used to dispose of references to queued header blocks
+// that are referenced by nghttp2 name-value structs used in HEADERS blocks
+// we avoid memcpy operations on each char* name/value passed onto nghttp2
+// which should provide performance benefits
+inline void Http2Session::RemoveHeadersReference(const nghttp2_frame_hd& hd) {
+  BaseObjectPtr<Http2Stream> stream = this->FindStream(hd.stream_id);
+
+  // stream may have closed somehow by this point, but given that we have just
+  // sent out a headers block it should exist
+  if (UNLIKELY(!stream)) {
+    return;
+  }
+
+  if (!stream->outgoing_headers_.empty()) {
+    stream->outgoing_headers_.pop();
+    Debug(stream->env(), DebugCategory::HTTP2STREAM, "frame sent on %d\n", hd.stream_id);
+  }
+}
+
 // If nghttp2 is unable to send a queued up frame, it will call this callback
 // to let us know. If the failure occurred because we are in the process of
 // closing down the session or stream, we go ahead and ignore it. We don't
@@ -1174,6 +1193,10 @@ int Http2Session::OnFrameNotSent(nghttp2_session* handle,
   Environment* env = session->env();
   Debug(session, "frame type %d was not sent, code: %d",
         frame->hd.type, error_code);
+
+  if (frame->hd.type == nghttp2_frame_type::NGHTTP2_HEADERS) {
+    session->RemoveHeadersReference(frame->hd);
+  }
 
   // Do not report if the frame was not sent due to the session closing
   if (error_code == NGHTTP2_ERR_SESSION_CLOSING ||
@@ -1207,6 +1230,11 @@ int Http2Session::OnFrameSent(nghttp2_session* handle,
                               const nghttp2_frame* frame,
                               void* user_data) {
   Http2Session* session = static_cast<Http2Session*>(user_data);
+
+  if (frame->hd.type == nghttp2_frame_type::NGHTTP2_HEADERS) {
+    session->RemoveHeadersReference(frame->hd);
+  }
+
   session->statistics_.frame_sent += 1;
   return 0;
 }
@@ -2011,7 +2039,7 @@ Http2Stream* Http2Session::SubmitRequest(
   Http2Scope h2scope(this);
   Http2Stream* stream = nullptr;
   Http2Stream::Provider::Stream prov(options);
-  *ret = nghttp2_submit_request(
+  *ret = nghttp2_submit_request2(
       session_.get(),
       &priority,
       headers.data(),
@@ -2200,6 +2228,7 @@ Http2Stream::Http2Stream(Http2Session* session,
 
   if (options & STREAM_OPTION_EMPTY_PAYLOAD)
     Shutdown();
+
   session->AddStream(this);
 }
 
@@ -2327,7 +2356,7 @@ int Http2Stream::SubmitResponse(const Http2Headers& headers, int options) {
     options |= STREAM_OPTION_EMPTY_PAYLOAD;
 
   Http2Stream::Provider::Stream prov(this, options);
-  int ret = nghttp2_submit_response(
+  int ret = nghttp2_submit_response2(
       session_->session(),
       id_,
       headers.data(),
@@ -2377,7 +2406,7 @@ int Http2Stream::SubmitTrailers(const Http2Headers& headers) {
   // to indicate that the stream is ready to be closed.
   if (headers.length() == 0) {
     Http2Stream::Provider::Stream prov(this, 0);
-    ret = nghttp2_submit_data(
+    ret = nghttp2_submit_data2(
         session_->session(),
         NGHTTP2_FLAG_END_STREAM,
         id_,
@@ -2537,11 +2566,11 @@ int Http2Stream::DoWrite(WriteWrap* req_wrap,
   for (size_t i = 0; i < nbufs; ++i) {
     // Store the req_wrap on the last write info in the queue, so that it is
     // only marked as finished once all buffers associated with it are finished.
-    queue_.emplace(NgHttp2StreamWrite {
+    queue_.emplace(
       BaseObjectPtr<AsyncWrap>(
           i == nbufs - 1 ? req_wrap->GetAsyncWrap() : nullptr),
       bufs[i]
-    });
+    );
     IncrementAvailableOutboundLength(bufs[i].len);
   }
   CHECK_NE(nghttp2_session_resume_data(
@@ -2834,16 +2863,22 @@ void Http2Session::Request(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&session, args.This());
   Environment* env = session->env();
 
-  Local<Array> headers = args[0].As<Array>();
+  Local<Object> headers = args[0].As<Object>();
   int32_t options = args[1]->Int32Value(env->context()).ToChecked();
 
   Debug(session, "request submitted");
 
   int32_t ret = 0;
+  auto headers_ptr = std::make_unique<Http2Headers>(env, headers, http2_request);
+  if (!headers_ptr->isValid()) {
+    // no need to set return value is we've thrown an exception
+    return;
+  }
+
   Http2Stream* stream =
       session->Http2Session::SubmitRequest(
           Http2Priority(env, args[2], args[3], args[4]),
-          Http2Headers(env, headers),
+          *headers_ptr,
           &ret,
           static_cast<int>(options));
 
@@ -2854,6 +2889,7 @@ void Http2Session::Request(const FunctionCallbackInfo<Value>& args) {
 
   Debug(session, "request submitted, new stream id %d", stream->id());
   args.GetReturnValue().Set(stream->object());
+  stream->outgoing_headers_.push(std::move(headers_ptr));
 }
 
 // Submits a GOAWAY frame to signal that the Http2Session is in the process
@@ -2933,13 +2969,25 @@ void Http2Stream::Respond(const FunctionCallbackInfo<Value>& args) {
   Http2Stream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.This());
 
-  Local<Array> headers = args[0].As<Array>();
+  CHECK_EQ(args.Length(), 2);
+  CHECK(args[0]->IsObject());
+  CHECK(args[1]->IsNumber());
+
+  HandleScope handle_scope(env->isolate());
+  Local<Object> rawHeaders = args[0].As<Object>();
   int32_t options = args[1]->Int32Value(env->context()).ToChecked();
 
+  auto headers_ptr = std::make_unique<Http2Headers>(env, rawHeaders, http2_response);
+  if (!headers_ptr->isValid()) {
+    Debug(stream, "headers invalid");
+    return;
+  }
+
+  // store headers until we receive frame_sent / not_sent
   args.GetReturnValue().Set(
-      stream->SubmitResponse(
-          Http2Headers(env, headers),
-          static_cast<int>(options)));
+      stream->SubmitResponse(*headers_ptr, static_cast<int>(options)));
+  stream->outgoing_headers_.push(std::move(headers_ptr));
+
   Debug(stream, "response submitted");
 }
 
@@ -2950,9 +2998,19 @@ void Http2Stream::Info(const FunctionCallbackInfo<Value>& args) {
   Http2Stream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.This());
 
-  Local<Array> headers = args[0].As<Array>();
+  HandleScope handle_scope(env->isolate());
+  Local<Object> rawHeaders = args[0].As<Object>();
 
-  args.GetReturnValue().Set(stream->SubmitInfo(Http2Headers(env, headers)));
+  auto headers_ptr = std::make_unique<Http2Headers>(env, rawHeaders, http2_response);
+  if (!headers_ptr->isValid()) {
+    Debug(stream, "info headers invalid, returning");
+    return;
+  }
+
+  args.GetReturnValue().Set(stream->SubmitInfo(*headers_ptr));
+  stream->outgoing_headers_.push(std::move(headers_ptr));
+
+  Debug(stream, "info headers submitted");
 }
 
 // Submits trailing headers on the Http2Stream
@@ -2961,10 +3019,26 @@ void Http2Stream::Trailers(const FunctionCallbackInfo<Value>& args) {
   Http2Stream* stream;
   ASSIGN_OR_RETURN_UNWRAP(&stream, args.This());
 
-  Local<Array> headers = args[0].As<Array>();
+  HandleScope handle_scope(env->isolate());
+  Local<Object> headers = args[0].As<Object>();
 
-  args.GetReturnValue().Set(
-      stream->SubmitTrailers(Http2Headers(env, headers)));
+  Debug(stream, "preparing trailers");
+
+  auto trailers_ptr = std::make_unique<Http2Headers>(env, headers, http2_trailer);
+  if (!trailers_ptr->isValid()) {
+    Debug(stream, "trailers invalid, returning");
+    return;
+  }
+
+
+  Debug(stream, "submitting trailers");
+  args.GetReturnValue().Set(stream->SubmitTrailers(*trailers_ptr));
+
+  // store headers until we receive frame_sent / not_sent
+  // but only if we actually have headers
+  if (trailers_ptr->length() > 0) {
+    stream->outgoing_headers_.push(std::move(trailers_ptr));
+  }
 }
 
 // Grab the numeric id of the Http2Stream
@@ -3004,6 +3078,7 @@ void Http2Stream::PushPromise(const FunctionCallbackInfo<Value>& args) {
     Debug(parent, "failed to create push stream: %d", ret);
     return args.GetReturnValue().Set(ret);
   }
+
   Debug(parent, "push stream %d created", stream->id());
   args.GetReturnValue().Set(stream->object());
 }
@@ -3432,6 +3507,17 @@ void Initialize(Local<Object> target,
                                     false>);
   SetConstructorFunction(context, target, "Http2Session", session);
 
+  // Exported Symbols
+  Local<Object> symbols = Object::New(isolate);
+
+  NODE_DEFINE_SYMBOL_CONSTANT(symbols, "sensitiveHeaders", "nodejs.http2.sensitiveHeaders");
+  NODE_DEFINE_SYMBOL_CONSTANT(symbols, "socket", "socket");
+  NODE_DEFINE_SYMBOL_CONSTANT(symbols, "proxySocket", "proxySocket");
+  NODE_DEFINE_SYMBOL_CONSTANT(symbols, "request", "request");
+
+  target->Set(context, FIXED_ONE_BYTE_STRING(isolate, "symbols"), symbols).Check();
+
+  // Constants
   Local<Object> constants = Object::New(isolate);
 
   // This does allocate one more slot than needed but it's not used.

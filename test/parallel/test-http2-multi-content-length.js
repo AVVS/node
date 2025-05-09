@@ -23,19 +23,17 @@ server.listen(0, common.mustCall(() => {
   });
 
   // Request 1 will fail because there are two content-length header values
-  assert.throws(
-    () => {
-      client.request({
-        ':method': 'POST',
-        'content-length': 1,
-        'Content-Length': 2
-      });
-    }, {
+  client
+    .request({
+      ':method': 'POST',
+      'content-length': 1,
+      'Content-Length': 2
+    })
+    .on('error', common.expectsError({
       code: 'ERR_HTTP2_HEADER_SINGLE_VALUE',
       name: 'TypeError',
       message: 'Header field "content-length" must only have a single value'
-    }
-  );
+    }));
 
   {
     // Request 2 will succeed
